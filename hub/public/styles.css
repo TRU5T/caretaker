@@ -46,6 +46,28 @@ body {
   margin-bottom: 22px;
 }
 
+.brand-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.brand-logo {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  flex: none;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+}
+
+.brand.row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .brand h1 {
   margin: 0;
   font-size: 1.75rem;
@@ -117,6 +139,12 @@ button,
   color: #041016;
   background: linear-gradient(135deg, var(--accent), #2bb8a8);
   transition: transform 0.12s ease, filter 0.12s ease, opacity 0.12s ease;
+}
+
+a.btn {
+  display: block;
+  text-align: center;
+  text-decoration: none;
 }
 
 button:active {

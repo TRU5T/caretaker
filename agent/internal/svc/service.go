@@ -8,12 +8,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/TRU5T/caretaker/agent/internal/agent"
+	"github.com/TRU5T/caretaker/agent/internal/config"
 	"github.com/kardianos/service"
-	"github.com/sam/caretaker/agent/internal/agent"
-	"github.com/sam/caretaker/agent/internal/config"
 )
 
 type program struct {
@@ -94,11 +95,13 @@ func (p *program) Stop(_ service.Service) error {
 	return nil
 }
 
-func newService(cfgPath string, cfg *config.Config) (service.Service, *program, error) {
+func newService(cfgPath string, cfg *config.Config, executable string) (service.Service, *program, error) {
 	svcConfig := &service.Config{
 		Name:        "CaretakerAgent",
 		DisplayName: "Caretaker Agent",
 		Description: "Moonlight/Apollo companion — sleep, unlock, heartbeat for Caretaker Hub",
+		Executable:  executable,
+		Arguments:   []string{"run", "--config", cfgPath},
 	}
 	prg := &program{cfgPath: cfgPath, cfg: cfg}
 	s, err := service.New(prg, svcConfig)
@@ -106,7 +109,7 @@ func newService(cfgPath string, cfg *config.Config) (service.Service, *program, 
 }
 
 func Run(cfgPath string, cfg *config.Config) error {
-	s, prg, err := newService(cfgPath, cfg)
+	s, prg, err := newService(cfgPath, cfg, "")
 	if err != nil {
 		return err
 	}
@@ -161,7 +164,7 @@ func Control(action string) error {
 	if err != nil {
 		return err
 	}
-	s, _, err := newService(path, cfg)
+	s, _, err := newService(path, cfg, "")
 	if err != nil {
 		return err
 	}
@@ -170,6 +173,100 @@ func Control(action string) error {
 	}
 	if action == "install" {
 		configureRestartOnFailure("CaretakerAgent")
+		if exe, err := os.Executable(); err == nil {
+			configureFirewall(exe)
+		}
+	}
+	if action == "uninstall" {
+		removeFirewall()
 	}
 	return nil
+}
+
+// StopIfRunning stops the Windows service when it is installed and running.
+func StopIfRunning() {
+	s, err := serviceHandle("")
+	if err != nil {
+		return
+	}
+	st, err := s.Status()
+	if err == nil && st == service.StatusRunning {
+		_ = s.Stop()
+	}
+}
+
+// InstallAndStart registers the service to run executable (empty = this process),
+// then starts it. Safe to call when the service already exists.
+func InstallAndStart(executable string) error {
+	s, err := serviceHandle(executable)
+	if err != nil {
+		return err
+	}
+	if st, err := s.Status(); err == nil && st == service.StatusRunning {
+		_ = s.Stop()
+		time.Sleep(400 * time.Millisecond)
+	}
+	if err := s.Install(); err != nil {
+		if !alreadyInstalled(err) {
+			return err
+		}
+		_ = s.Uninstall()
+		time.Sleep(400 * time.Millisecond)
+		if err := s.Install(); err != nil {
+			return err
+		}
+	}
+	configureRestartOnFailure("CaretakerAgent")
+	exe := executable
+	if exe == "" {
+		exe, _ = os.Executable()
+	}
+	if exe != "" {
+		configureFirewall(exe)
+	}
+	return s.Start()
+}
+
+// UninstallService stops and deletes the Windows service. Missing service is OK.
+func UninstallService() error {
+	s, err := serviceHandle("")
+	if err != nil {
+		return err
+	}
+	_ = s.Stop()
+	err = s.Uninstall()
+	removeFirewall()
+	if err != nil && !notInstalled(err) {
+		return err
+	}
+	return nil
+}
+
+func serviceHandle(executable string) (service.Service, error) {
+	path := config.DefaultPath()
+	cfg, err := config.LoadOrCreate(path)
+	if err != nil {
+		return nil, err
+	}
+	s, _, err := newService(path, cfg, executable)
+	return s, err
+}
+
+func alreadyInstalled(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "already exists") || strings.Contains(s, "already installed")
+}
+
+func notInstalled(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == service.ErrNotInstalled {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "not installed") || strings.Contains(s, "does not exist")
 }

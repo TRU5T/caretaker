@@ -61,3 +61,4 @@ export interface HostLiveStatus {
 
 export const AGENT_DEFAULT_PORT = 7842;
 export const HUB_VERSION = "0.1.0";
+export const AGENT_VERSION = "0.1.0";

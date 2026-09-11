@@ -1,6 +1,8 @@
 services:
   caretaker-hub:
-    build: .
+    build:
+      context: ..
+      dockerfile: hub/Dockerfile
     container_name: caretaker-hub
     restart: unless-stopped
     # Host networking so Wake-on-LAN UDP broadcast reaches the LAN.

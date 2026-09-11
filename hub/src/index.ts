@@ -7,6 +7,7 @@ import cookieParser from "cookie-parser";
 import { ensureConfig, listenPort } from "./config.js";
 import { api } from "./routes.js";
 import { startDiscoveryListener } from "./discovery.js";
+import { agentWindowsInfo } from "./agentDownload.js";
 import { HUB_VERSION } from "./types.js";
 
 // Allow self-signed Apollo certificates for reachability probes.
@@ -42,4 +43,10 @@ const port = listenPort();
 app.listen(port, () => {
   console.log(`caretaker-hub v${HUB_VERSION} listening on :${port}`);
   console.log(`data dir: ${process.env.CARETAKER_DATA || path.resolve(process.cwd(), "../data")}`);
+  const installer = agentWindowsInfo();
+  if (installer.available) {
+    console.log(`windows installer: ${installer.filename} v${installer.version} (${installer.size} bytes)`);
+  } else {
+    console.log("windows installer: not bundled (Setup download will be hidden)");
+  }
 });

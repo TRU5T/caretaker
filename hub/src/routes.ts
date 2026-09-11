@@ -18,6 +18,7 @@ import { AgentClient } from "./agentClient.js";
 import { wakeHost } from "./wol.js";
 import { clearWaking, getLiveStatus, markWaking, recordHeartbeat } from "./status.js";
 import { listDiscovered, pairDiscovered } from "./discovery.js";
+import { agentWindowsDownloadHandler, agentWindowsInfoHandler } from "./agentDownload.js";
 import type { HostConfig, HostPublic } from "./types.js";
 import { HUB_VERSION } from "./types.js";
 
@@ -57,6 +58,9 @@ function findHost(id: string): HostConfig | undefined {
 api.get("/health", (_req, res) => {
   res.json({ ok: true, version: HUB_VERSION, service: "caretaker-hub" });
 });
+
+api.get("/agent/windows/info", requireAuth, agentWindowsInfoHandler);
+api.get("/agent/windows", requireAuth, agentWindowsDownloadHandler);
 
 api.get("/me", meHandler);
 api.post("/login", loginHandler);

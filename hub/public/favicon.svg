@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <title>Caretaker</title>
+  <defs>
+    <linearGradient id="tile" x1="96" y1="40" x2="430" y2="490" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#122038"/>
+      <stop offset="1" stop-color="#070b14"/>
+    </linearGradient>
+    <filter id="glow-teal" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="10" result="b"/>
+      <feColorMatrix in="b" type="matrix" values="0 0 0 0 0.239  0 0 0 0 0.839  0 0 0 0 0.776  0 0 0 0.6 0" result="g"/>
+      <feMerge>
+        <feMergeNode in="g"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="glow-blue" x="-90%" y="-90%" width="280%" height="280%">
+      <feGaussianBlur stdDeviation="8" result="b"/>
+      <feColorMatrix in="b" type="matrix" values="0 0 0 0 0.357  0 0 0 0 0.549  0 0 0 0 1  0 0 0 0.75 0" result="g"/>
+      <feMerge>
+        <feMergeNode in="g"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <mask id="crescent" maskUnits="userSpaceOnUse">
+      <rect width="512" height="512" fill="black"/>
+      <circle cx="232" cy="272" r="172" fill="white"/>
+      <circle cx="304" cy="236" r="132" fill="black"/>
+    </mask>
+  </defs>
+  <rect width="512" height="512" rx="114" fill="url(#tile)"/>
+  <rect width="512" height="512" fill="#3dd6c6" mask="url(#crescent)" filter="url(#glow-teal)"/>
+  <g filter="url(#glow-blue)" fill="#5b8cff">
+    <circle cx="278" cy="232" r="30"/>
+    <rect x="264" y="250" width="28" height="58" rx="14"/>
+  </g>
+</svg>
