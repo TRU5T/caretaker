@@ -1,0 +1,11 @@
+# Ignore
+node_modules/
+dist/
+data/config.json
+data/*.tmp
+*.exe
+*.log
+.DS_Store
+.env
+agent/caretaker-agent
+agent/caretaker-agent.exe

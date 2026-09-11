@@ -1,0 +1,16 @@
+services:
+  caretaker-hub:
+    build: .
+    container_name: caretaker-hub
+    restart: unless-stopped
+    # Host networking so Wake-on-LAN UDP broadcast reaches the LAN.
+    # On Docker Desktop / non-Linux, use ports + a correct broadcastAddress instead.
+    network_mode: host
+    environment:
+      CARETAKER_DATA: /data
+      CARETAKER_PORT: "8080"
+      # Set on first run; change via env or edit data/config.json
+      CARETAKER_UI_PASSWORD: ${CARETAKER_UI_PASSWORD:-changeme}
+      CARETAKER_SESSION_SECRET: ${CARETAKER_SESSION_SECRET:-dev-session-secret-change-me}
+    volumes:
+      - ../data:/data

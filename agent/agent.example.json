@@ -1,0 +1,8 @@
+{
+  "listenAddr": ":7842",
+  "token": "replace-with-shared-token-from-hub",
+  "hubUrl": "http://10.0.1.10:8080",
+  "hostId": "replace-with-host-id-from-hub",
+  "mac": "AA:BB:CC:DD:EE:FF",
+  "name": "Gaming PC"
+}

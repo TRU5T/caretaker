@@ -1,0 +1,11 @@
+{
+  "name": "caretaker",
+  "private": true,
+  "description": "Moonlight/Apollo companion — hub + Windows agent",
+  "scripts": {
+    "hub:dev": "npm --prefix hub run dev",
+    "hub:build": "npm --prefix hub run build",
+    "agent:build": "cd agent && go build -o caretaker-agent ./cmd/caretaker-agent",
+    "agent:windows": "bash agent/build-windows.sh"
+  }
+}

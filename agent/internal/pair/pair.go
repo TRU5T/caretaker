@@ -1,0 +1,104 @@
+package pair
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/sam/caretaker/agent/internal/config"
+)
+
+type Options struct {
+	HubURL     string
+	Code       string
+	AgentURL   string
+	MAC        string // optional — hub already has MAC from Add PC
+	Name       string
+	ConfigPath string
+}
+
+func Complete(opts Options) error {
+	if opts.HubURL == "" || opts.Code == "" || opts.AgentURL == "" {
+		return fmt.Errorf("--hub, --code, and --agent-url are required")
+	}
+	host, _ := os.Hostname()
+	name := opts.Name
+	if name == "" {
+		name = host
+	}
+	payload := map[string]string{
+		"pairingCode": strings.ToUpper(opts.Code),
+		"agentUrl":    strings.TrimRight(opts.AgentURL, "/"),
+		"name":        name,
+		"hostname":    host,
+	}
+	if opts.MAC != "" {
+		payload["mac"] = opts.MAC
+	}
+	body, _ := json.Marshal(payload)
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Post(strings.TrimRight(opts.HubURL, "/")+"/api/pair/complete", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("pair failed (%d): %s", resp.StatusCode, string(b))
+	}
+	var out struct {
+		OK         bool   `json:"ok"`
+		HostID     string `json:"hostId"`
+		AgentToken string `json:"agentToken"`
+		MAC        string `json:"mac"`
+		Name       string `json:"name"`
+	}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return err
+	}
+	u, err := parseListenFromAgentURL(opts.AgentURL)
+	if err != nil {
+		u = fmt.Sprintf(":%d", config.DefaultPort)
+	}
+	mac := opts.MAC
+	if mac == "" {
+		mac = out.MAC
+	}
+	if out.Name != "" {
+		name = out.Name
+	}
+	cfg := &config.Config{
+		ListenAddr: u,
+		Token:      out.AgentToken,
+		HubURL:     strings.TrimRight(opts.HubURL, "/"),
+		HostID:     out.HostID,
+		MAC:        mac,
+		Name:       name,
+	}
+	return config.Save(opts.ConfigPath, cfg)
+}
+
+func parseListenFromAgentURL(agentURL string) (string, error) {
+	if !strings.Contains(agentURL, "://") {
+		agentURL = "http://" + agentURL
+	}
+	rest := agentURL
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	}
+	hostport := rest
+	if i := strings.IndexAny(hostport, "/?"); i >= 0 {
+		hostport = hostport[:i]
+	}
+	_, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return "", err
+	}
+	return ":" + port, nil
+}

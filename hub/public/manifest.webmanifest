@@ -1,0 +1,10 @@
+{
+  "name": "Caretaker",
+  "short_name": "Caretaker",
+  "description": "Moonlight companion — wake, unlock, sleep",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1220",
+  "theme_color": "#0b1220",
+  "icons": []
+}
