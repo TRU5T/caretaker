@@ -8,10 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sam/caretaker/agent/internal/agent"
-	"github.com/sam/caretaker/agent/internal/config"
-	"github.com/sam/caretaker/agent/internal/pair"
-	"github.com/sam/caretaker/agent/internal/svc"
+	"github.com/TRU5T/caretaker/agent/internal/agent"
+	"github.com/TRU5T/caretaker/agent/internal/config"
+	"github.com/TRU5T/caretaker/agent/internal/pair"
+	"github.com/TRU5T/caretaker/agent/internal/setup"
+	"github.com/TRU5T/caretaker/agent/internal/svc"
 )
 
 func main() {
@@ -25,6 +26,17 @@ func main() {
 			return
 		case "unlock-helper":
 			unlockHelperCmd()
+			return
+		case "setup":
+			uninstall := false
+			for _, a := range os.Args[2:] {
+				if a == "--uninstall" || a == "/uninstall" {
+					uninstall = true
+				}
+			}
+			if err := setup.Run(uninstall); err != nil {
+				fatal(err)
+			}
 			return
 		case "install", "uninstall", "start", "stop":
 			if err := svc.Control(os.Args[1]); err != nil {
@@ -40,7 +52,14 @@ func main() {
 		}
 	}
 
-	// Default: run in foreground (also used by Windows service)
+	// Double-click from Explorer → GUI installer. Service / cmd still fall through to run.
+	if setup.ShouldAutoLaunch() {
+		if err := setup.Run(false); err != nil {
+			fatal(err)
+		}
+		return
+	}
+
 	runCmd(os.Args[1:])
 }
 
@@ -126,6 +145,8 @@ func printHelp() {
 	fmt.Print(`caretaker-agent — Windows companion for Caretaker Hub / Moonlight+Apollo
 
 Usage:
+  caretaker-agent                 (double-click: install as a Windows service)
+  caretaker-agent setup [--uninstall]
   caretaker-agent run [--config path]
   caretaker-agent pair --hub URL --code CODE --agent-url URL [--mac MAC] [--name NAME]
   caretaker-agent install|uninstall|start|stop

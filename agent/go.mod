@@ -1,4 +1,4 @@
-module github.com/sam/caretaker/agent
+module github.com/TRU5T/caretaker/agent
 
 go 1.22
 

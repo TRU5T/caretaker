@@ -15,6 +15,7 @@ const state = {
   tab: "home",
   pollTimer: null,
   pollInFlight: false,
+  agentInstaller: { available: false },
 };
 
 async function api(path, opts = {}) {
@@ -87,6 +88,14 @@ async function refreshDiscovered() {
     state.discovered = data.agents || [];
   } catch {
     state.discovered = [];
+  }
+}
+
+async function refreshInstaller() {
+  try {
+    state.agentInstaller = await api("/agent/windows/info");
+  } catch {
+    state.agentInstaller = { available: false };
   }
 }
 
@@ -165,8 +174,13 @@ function stopPolling() {
 function renderLogin() {
   app.innerHTML = `
     <div class="brand">
-      <h1>Caretaker</h1>
-      <p>Moonlight companion for Apollo</p>
+      <div class="brand-head">
+        <img class="brand-logo" src="/icon-192.png" width="48" height="48" alt="" />
+        <div>
+          <h1>Caretaker</h1>
+          <p>Moonlight companion for Apollo</p>
+        </div>
+      </div>
     </div>
     <div class="card stack">
       <label>UI password
@@ -201,9 +215,12 @@ function renderHome() {
 
   app.innerHTML = `
     <div class="brand row">
-      <div>
-        <h1>Caretaker</h1>
-        <p>Wake · Unlock · Sleep · Moonlight</p>
+      <div class="brand-head">
+        <img class="brand-logo" src="/icon-192.png" width="48" height="48" alt="" />
+        <div>
+          <h1>Caretaker</h1>
+          <p>Wake · Unlock · Sleep · Moonlight</p>
+        </div>
       </div>
       <button class="ghost" id="logoutBtn">Logout</button>
     </div>
@@ -227,7 +244,10 @@ function renderHome() {
       state.tab = btn.getAttribute("data-tab");
       state.message = "";
       state.error = "";
-      if (state.tab === "setup") await refreshDiscovered();
+      if (state.tab === "setup") {
+        await refreshDiscovered();
+        await refreshInstaller();
+      }
       render();
     };
   });
@@ -240,7 +260,7 @@ function renderHostPanel(host, st) {
   if (!host) {
     return `
       <div class="card stack">
-        <div class="meta">No hosts yet. Open Setup to add your Apollo gaming PC or start pairing.</div>
+        <div class="meta">No hosts yet. Open Setup to download the Windows installer and pair your gaming PC.</div>
         <button data-tab-jump="setup">Go to Setup</button>
       </div>
     `;
@@ -323,8 +343,10 @@ function renderHostPanel(host, st) {
 function bindHostPanel(host) {
   const jump = document.querySelector("[data-tab-jump]");
   if (jump) {
-    jump.onclick = () => {
+    jump.onclick = async () => {
       state.tab = "setup";
+      await refreshDiscovered();
+      await refreshInstaller();
       render();
     };
   }
@@ -459,12 +481,41 @@ async function doUnlock(hostId) {
   }
 }
 
+function formatBytes(n) {
+  if (!n) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderInstallerCard() {
+  const info = state.agentInstaller || { available: false };
+  if (!info.available) {
+    return `
+    <div class="card stack">
+      <strong>Install on this PC</strong>
+      <div class="meta">This Hub image does not include the Windows installer. Rebuild with <code>docker compose up --build</code> from the repo (it compiles the agent), or run <code>bash agent/build-windows.sh</code> and restart the Hub.</div>
+    </div>`;
+  }
+  const sha = info.sha256 ? String(info.sha256) : "";
+  const shaShort = sha ? `${sha.slice(0, 16)}…` : "";
+  return `
+    <div class="card stack">
+      <strong>Install on this PC</strong>
+      <div class="meta">Download the installer, double-click it, and accept the Windows admin prompt. No Command Prompt needed. This PC then appears under Nearby PCs — tap Pair.</div>
+      <a class="btn" href="/api/agent/windows" download="caretaker-agent-setup.exe">Download installer</a>
+      <div class="meta" title="${escapeHtml(sha)}">v${escapeHtml(info.version || "")} · ${escapeHtml(formatBytes(info.size))}${shaShort ? ` · SHA-256 ${escapeHtml(shaShort)}` : ""}</div>
+      <div class="meta">Windows may say the app is unsigned. More info → Run anyway. That is expected.</div>
+    </div>`;
+}
+
 function renderSetupPanel() {
   const hubUrl = `${location.protocol}//${location.host}`;
   return `
+    ${renderInstallerCard()}
     <div class="card stack">
       <strong>Nearby PCs</strong>
-      <div class="meta">Install the agent on a PC — it shows up here automatically. Tap Pair.</div>
+      <div class="meta">After the installer finishes, this PC shows up here. Tap Pair.</div>
       ${
         state.discovered.length === 0
           ? `<div class="meta">No unpaired agents seen yet. Make sure the agent is running on the same LAN.</div>`

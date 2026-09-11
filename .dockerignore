@@ -1,0 +1,9 @@
+.git
+data
+**/node_modules
+**/dist
+**/*.exe
+agent/caretaker-agent
+**/*.log
+.env
+.DS_Store

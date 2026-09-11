@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"syscall"
 
-	"github.com/sam/caretaker/agent/internal/agent"
+	"github.com/TRU5T/caretaker/agent/internal/agent"
 )
 
 // configureRestartOnFailure tells the SCM to bring the agent back up if the

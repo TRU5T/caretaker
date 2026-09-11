@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Is this malware? / is it safe?
+    url: https://github.com/TRU5T/caretaker/blob/main/SAFETY.md
+    about: Caretaker is not malware. Read what it can and cannot do, and why antivirus flags the agent.
+  - name: Report a vulnerability
+    url: https://github.com/TRU5T/caretaker/security/advisories/new
+    about: Do not file a public issue for security bugs.

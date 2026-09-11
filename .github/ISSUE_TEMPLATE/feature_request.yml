@@ -1,0 +1,21 @@
+name: Feature request
+description: Ask for a change that does not widen remote-control into a RAT.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Shell/file/screenshot APIs, unauthenticated internet exposure, and “make unlock simpler” without a tested Windows sequence are likely to be declined. See [CONTRIBUTING.md](https://github.com/TRU5T/caretaker/blob/main/CONTRIBUTING.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Idea
+    validations:
+      required: true

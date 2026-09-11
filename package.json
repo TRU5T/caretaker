@@ -1,7 +1,12 @@
 {
   "name": "caretaker",
   "private": true,
-  "description": "Moonlight/Apollo companion — hub + Windows agent",
+  "license": "MIT",
+  "description": "Self-hosted Moonlight/Apollo companion — wake, unlock, and sleep a Windows gaming PC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TRU5T/caretaker.git"
+  },
   "scripts": {
     "hub:dev": "npm --prefix hub run dev",
     "hub:build": "npm --prefix hub run build",

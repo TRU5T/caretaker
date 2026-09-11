@@ -9,3 +9,4 @@ data/*.tmp
 .env
 agent/caretaker-agent
 agent/caretaker-agent.exe
+scripts/node_modules/

@@ -1,0 +1,44 @@
+name: Antivirus / SmartScreen
+description: Defender or another scanner flagged caretaker-agent.exe.
+title: "[AV] "
+labels: ["antivirus"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The agent is **unsigned** and injects input on the Windows lock screen, so heuristic detections are expected. Read [SAFETY.md](https://github.com/TRU5T/caretaker/blob/main/SAFETY.md) first.
+
+        This template is for sharing **vendor detection names / hashes** so others (and we) can report false positives. It is not a place to claim the repo is a trojan without evidence.
+  - type: input
+    id: product
+    attributes:
+      label: Product
+      placeholder: Windows Defender, SmartScreen, Malwarebytes, …
+    validations:
+      required: true
+  - type: input
+    id: detection
+    attributes:
+      label: Detection name
+      placeholder: e.g. Trojan:Win32/Wacatac.B!ml
+  - type: input
+    id: hash
+    attributes:
+      label: SHA-256 of the binary
+      description: `Get-FileHash caretaker-agent.exe -Algorithm SHA256`
+  - type: dropdown
+    id: origin
+    attributes:
+      label: Where did the .exe come from?
+      options:
+        - I built it from this repo
+        - I downloaded it from my Caretaker Hub (Setup)
+        - GitHub Actions artifact / release from this repo
+        - Somewhere else (describe below)
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Extra detail
+      description: Screenshot of the alert is useful. Do not paste PINs or `agent.json` tokens.

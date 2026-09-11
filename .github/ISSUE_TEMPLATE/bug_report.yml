@@ -1,0 +1,50 @@
+name: Bug report
+description: Something does not work (wake, unlock, sleep, pairing, UI).
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For “Windows Defender ate my exe”, use the **Antivirus / SmartScreen** template.
+        For “is this a virus?”, read [SAFETY.md](https://github.com/TRU5T/caretaker/blob/main/SAFETY.md) instead of opening an issue.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      placeholder: Expected vs actual.
+    validations:
+      required: true
+  - type: dropdown
+    id: piece
+    attributes:
+      label: Where
+      options:
+        - Hub
+        - Agent
+        - Pairing / discovery
+        - Unlock
+        - Wake-on-LAN
+        - Sleep
+        - UI
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Hub `/api/health`, `caretaker-agent version`, Windows build, Apollo/Sunshine if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Hub docker logs and/or `%ProgramData%\Caretaker\agent.log`. Redact tokens. Never paste a PIN or password.

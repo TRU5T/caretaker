@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sam/caretaker/agent/internal/config"
+	"github.com/TRU5T/caretaker/agent/internal/config"
 )
 
 const (
