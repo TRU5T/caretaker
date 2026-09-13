@@ -25,9 +25,25 @@ Template: [`caretaker-hub.xml`](caretaker-hub.xml)
    - **Session Secret** — run `openssl rand -hex 32` on any machine and paste the result
    - Leave **Network Type** as **Host**
    - Leave Appdata at `/mnt/user/appdata/caretaker` unless you prefer another path
-5. **Apply**. Open `http://<unraid-ip>:8080`.
+   - If **8080** is already in use, set **WebUI Port** and **CARETAKER_PORT** to the **same** free port (e.g. both `8060`)
+5. **Apply**. Use the container’s **WebUI** button (or `http://<unraid-ip>:<port>`).
 
 Then on the Windows gaming PC: Hub → **Setup** → **Download installer** → run as Administrator → **Pair**.
+
+## WebUI button opens the wrong port
+
+Unraid’s WebUI link follows **WebUI Port**. The Hub listens on **CARETAKER_PORT**. Those two must match.
+
+**Fix a container already on 8060:**
+
+1. Docker → **Caretaker-Hub** → Edit  
+2. Set **CARETAKER_PORT** = `8060`  
+3. Toggle **Advanced View** → set **WebUI** to `http://[IP]:[PORT:8080]/`  
+4. Add or edit a **Port** mapping: Container Port `8080`, Host Port `8060`, TCP  
+   (host networking ignores the map for Docker, but Unraid uses Host Port for the WebUI button)  
+5. **Apply**
+
+Or the one-liner Advanced WebUI override: `http://[IP]:8060/`
 
 ## Install via template repository
 
@@ -59,7 +75,7 @@ Nothing is “mapped”; the Hub binds on the Unraid host:
 | **8080** TCP | Web UI (change with `CARETAKER_PORT`) |
 | **7843** UDP | Listens for unpaired agent beacons |
 
-If 8080 is already taken (common), set **Web UI Port** to e.g. `18080`, then under **Advanced View** change **WebUI** to `http://[IP]:18080/`.
+If 8080 is already taken, set **WebUI Port** and **CARETAKER_PORT** to the **same** value (e.g. both `8060`). Do not change only one of them.
 
 ## Environment variables
 
