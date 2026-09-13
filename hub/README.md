@@ -4,6 +4,8 @@ Always-on companion UI: Wake-on-LAN, agent proxy (sleep/unlock), Apollo reachabi
 
 Runs in Docker on a Linux NAS / Pi / homelab VM. **Not** intended to be published to the internet — see [SAFETY.md](../SAFETY.md).
 
+**Unraid:** use the Community-style template in [`../unraid/`](../unraid/) (`ghcr.io/tru5t/caretaker-hub:latest`, host network). Step-by-step: [`../unraid/README.md`](../unraid/README.md).
+
 ## Run (Docker)
 
 From this directory:

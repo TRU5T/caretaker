@@ -1,0 +1,74 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>Caretaker-Hub</Name>
+  <Repository>ghcr.io/tru5t/caretaker-hub:latest</Repository>
+  <Registry>https://ghcr.io/tru5t/caretaker-hub</Registry>
+  <Network>host</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/TRU5T/caretaker/issues</Support>
+  <Project>https://github.com/TRU5T/caretaker</Project>
+  <Overview>Self-hosted Moonlight/Apollo companion: wake a Windows gaming PC (Wake-on-LAN), unlock the lock screen from your phone, and sleep it when you are done. LAN-only — do not expose to the internet.</Overview>
+  <Category>Tools:Utilities MediaApp:Other Network:Other</Category>
+  <WebUI>http://[IP]:8080/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/TRU5T/caretaker/main/unraid/caretaker-hub.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/TRU5T/caretaker/main/docs/logo.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>Host networking is required so Wake-on-LAN and agent discovery (UDP 7843) reach your LAN. Keep this container off the public internet — use Tailscale/WireGuard if you need remote access. See SAFETY.md in the project repo.</Requires>
+  <Description>
+Caretaker Hub runs on your Unraid box and talks to a small Windows agent on your gaming PC.
+
+After install:
+1. Open http://TOWER:8080 (or your Unraid IP) and sign in with the UI password you set below.
+2. On the Windows PC: Hub → Setup → Download installer → run as Administrator.
+3. Pair the PC from Nearby PCs, then Wake / Unlock / Sleep from your phone.
+
+Defaults use host networking and listen on port 8080. If something else already uses 8080, change CARETAKER_PORT and edit the WebUI URL in Advanced View to match.
+
+Not malware, but privileged: anyone who can log into the Hub can wake, unlock, and sleep paired PCs. Full details: https://github.com/TRU5T/caretaker/blob/main/SAFETY.md
+  </Description>
+  <Networking>
+    <Mode>host</Mode>
+  </Networking>
+  <Data>
+    <Volume>
+      <HostDir>/mnt/user/appdata/caretaker</HostDir>
+      <ContainerDir>/data</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+  </Data>
+  <Environment>
+    <Variable>
+      <Value>/data</Value>
+      <Name>CARETAKER_DATA</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>8080</Value>
+      <Name>CARETAKER_PORT</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>CARETAKER_UI_PASSWORD</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>CARETAKER_SESSION_SECRET</Name>
+      <Mode/>
+    </Variable>
+  </Environment>
+  <Labels/>
+  <Config Name="Appdata" Target="/data" Default="/mnt/user/appdata/caretaker" Mode="rw" Description="Persistent Hub config (password hash, hosts, pairing codes)." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/caretaker</Config>
+  <Config Name="CARETAKER_DATA" Target="CARETAKER_DATA" Default="/data" Mode="" Description="Leave as /data (matches the Appdata mount)." Type="Variable" Display="advanced" Required="true" Mask="false">/data</Config>
+  <Config Name="Web UI Port" Target="CARETAKER_PORT" Default="8080" Mode="" Description="HTTP port on the Unraid host (host networking). If you change this, also edit the WebUI URL under Advanced View." Type="Variable" Display="always" Required="true" Mask="false">8080</Config>
+  <Config Name="UI Password" Target="CARETAKER_UI_PASSWORD" Default="" Mode="" Description="Hub login password. Used only on first start (when config.json is created). Pick something strong — default in the image path is changeme if left empty." Type="Variable" Display="always" Required="true" Mask="true"></Config>
+  <Config Name="Session Secret" Target="CARETAKER_SESSION_SECRET" Default="" Mode="" Description="HMAC secret for the session cookie. Generate once (e.g. openssl rand -hex 32) and keep it. Changing it signs everyone out." Type="Variable" Display="always" Required="true" Mask="true"></Config>
+</Container>

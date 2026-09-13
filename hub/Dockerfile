@@ -18,6 +18,10 @@ FROM node:20-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 ENV CARETAKER_DATA=/data
+LABEL org.opencontainers.image.title="Caretaker Hub" \
+  org.opencontainers.image.description="Moonlight/Apollo companion — wake, unlock, sleep a Windows gaming PC" \
+  org.opencontainers.image.source="https://github.com/TRU5T/caretaker" \
+  org.opencontainers.image.licenses="MIT"
 COPY hub/package.json hub/package-lock.json* ./
 RUN npm install --omit=dev
 COPY --from=build /app/dist ./dist
