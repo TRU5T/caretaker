@@ -56,6 +56,10 @@ Apollo has no host WoL / sleep / unlock API, which is why this exists.
 
 ### 1. Hub (container)
 
+**Unraid (recommended on a NAS):** see **[`unraid/README.md`](unraid/README.md)** — drop in the template, use host networking, image `ghcr.io/tru5t/caretaker-hub:latest`.
+
+**Docker Compose** (any Linux host):
+
 ```bash
 cd hub
 export CARETAKER_UI_PASSWORD='pick-a-strong-password'
