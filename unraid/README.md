@@ -21,14 +21,14 @@ Template: [`caretaker-hub.xml`](caretaker-hub.xml)
 2. **Docker** → **Add Container**.
 3. Open the **Template** dropdown and choose **Caretaker-Hub** (user templates appear at the bottom).
 4. Set:
-   - **UI Password** — strong password (first boot only)
-   - **Session Secret** — run `openssl rand -hex 32` on any machine and paste the result
+   - **UI Password** — strong password, 10+ characters (first boot only)
+   - **Session Secret** — optional: paste the output of `openssl rand -hex 32`, or leave empty and the Hub generates one
    - Leave **Network Type** as **Host**
    - Leave Appdata at `/mnt/user/appdata/caretaker` unless you prefer another path
    - If **8080** is already in use, set **WebUI Port** and **CARETAKER_PORT** to the **same** free port (e.g. both `8060`)
 5. **Apply**. Use the container’s **WebUI** button (or `http://<unraid-ip>:<port>`).
 
-Then on the Windows gaming PC: Hub → **Setup** → **Download installer** → run as Administrator → **Pair**.
+Then on the Windows gaming PC: Hub → **Setup** → **Download installer** → run as Administrator. Type the pairing code it shows into the Hub next to the PC under Nearby PCs → **Pair**.
 
 ## WebUI button opens the wrong port
 
@@ -81,8 +81,9 @@ If 8080 is already taken, set **WebUI Port** and **CARETAKER_PORT** to the **sam
 
 | Variable | Required | Notes |
 |----------|----------|--------|
-| `CARETAKER_UI_PASSWORD` | yes | First config only |
-| `CARETAKER_SESSION_SECRET` | yes | Keep stable after first set |
+| `CARETAKER_UI_PASSWORD` | yes | First config only; `changeme` if empty, and you must change it at first sign-in |
+| `CARETAKER_SESSION_SECRET` | no | 32+ chars; auto-generated if empty. Keep stable after first set |
+| `CARETAKER_UID` / `CARETAKER_GID` | no | Hub runs as this user (template: `99`/`100`) |
 | `CARETAKER_PORT` | no | Default `8080` |
 | `CARETAKER_DATA` | no | Keep `/data` with the Appdata mount |
 

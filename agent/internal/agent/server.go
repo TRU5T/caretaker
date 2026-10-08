@@ -1,6 +1,10 @@
 package agent
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -15,7 +19,7 @@ import (
 )
 
 const (
-	Version     = "0.1.0"
+	Version     = "0.2.0"
 	BeaconPort  = 7843
 	BeaconMagic = "caretaker-agent"
 )
@@ -40,23 +44,41 @@ type DiscoverInfo struct {
 	MACs         []string `json:"macs"`
 	Addresses    []string `json:"addresses"`
 	PreferredMAC string   `json:"preferredMac,omitempty"`
+	// TLS is always true for this version; lets the hub tell old agents apart.
+	TLS bool `json:"tls"`
 }
 
 type Server struct {
 	cfgPath   string
 	cfg       *config.Config
+	cert      *config.AgentCert
 	startedAt time.Time
+
+	// OnPairingChanged runs (in its own goroutine) after pair/unpair, e.g. to
+	// update the firewall rule. Optional.
+	OnPairingChanged func(cfg config.Config)
 
 	mu              sync.Mutex
 	unlockFails     int
 	maxUnlockFails  int
 	unlockWindowEnd time.Time
+
+	pairFails     int
+	pairLockUntil time.Time
 }
 
-func NewServer(cfgPath string, cfg *config.Config) *Server {
+const (
+	maxPairFails  = 5
+	pairLockout   = 15 * time.Minute
+	maxBodyBytes  = 64 << 10
+	minTokenBytes = 32
+)
+
+func NewServer(cfgPath string, cfg *config.Config, cert *config.AgentCert) *Server {
 	return &Server{
 		cfgPath:        cfgPath,
 		cfg:            cfg,
+		cert:           cert,
 		startedAt:      time.Now(),
 		maxUnlockFails: 3,
 	}
@@ -65,7 +87,7 @@ func NewServer(cfgPath string, cfg *config.Config) *Server {
 func (s *Server) paired() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.cfg.Token != "" && s.cfg.HostID != ""
+	return s.cfg.Paired()
 }
 
 func (s *Server) token() string {
@@ -85,6 +107,9 @@ func (s *Server) hostID() string {
 	defer s.mu.Unlock()
 	return s.cfg.HostID
 }
+
+// ListenPort is the TCP port the agent serves on.
+func (s *Server) ListenPort() int { return s.listenPort() }
 
 func (s *Server) listenPort() int {
 	s.mu.Lock()
@@ -116,7 +141,21 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/sleep", s.auth(s.handleSleep))
 	mux.HandleFunc("/unlock", s.auth(s.handleUnlock))
 	mux.HandleFunc("/prepare", s.auth(s.handlePrepare))
-	return recoverPanics(mux)
+	mux.HandleFunc("/rotate", s.auth(s.handleRotate))
+	mux.HandleFunc("/unpair", s.auth(s.handleUnpair))
+	return recoverPanics(limitBodies(mux))
+}
+
+// limitBodies caps request bodies; nothing the agent accepts is large.
+func limitBodies(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func writeErr(w http.ResponseWriter, code int, msg string) {
+	writeJSON(w, code, map[string]string{"error": msg})
 }
 
 // recoverPanics keeps one bad request from taking the whole service down.
@@ -136,17 +175,25 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok := s.token()
 		if tok == "" {
-			http.Error(w, `{"error":"agent not paired yet"}`, http.StatusServiceUnavailable)
+			writeErr(w, http.StatusServiceUnavailable, "agent not paired yet")
 			return
 		}
 		got := r.Header.Get("Authorization")
 		const prefix = "Bearer "
-		if len(got) < len(prefix) || got[:len(prefix)] != prefix || got[len(prefix):] != tok {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		if !strings.HasPrefix(got, prefix) || !constantTimeEqual(got[len(prefix):], tok) {
+			writeErr(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		next(w, r)
 	}
+}
+
+// constantTimeEqual compares secrets without leaking where they differ.
+// Hashing first also hides the length of the expected value.
+func constantTimeEqual(a, b string) bool {
+	ha := sha256.Sum256([]byte(a))
+	hb := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -182,6 +229,7 @@ func (s *Server) discoverInfo() DiscoverInfo {
 		MACs:         macs,
 		Addresses:    addrs,
 		PreferredMAC: pref,
+		TLS:          true,
 	}
 }
 
@@ -191,24 +239,90 @@ type pairReq struct {
 	HubURL string `json:"hubUrl"`
 	Name   string `json:"name,omitempty"`
 	MAC    string `json:"mac,omitempty"`
+	// Proof = hex(HMAC-SHA256(key=pairCode, "caretaker-pair-v1\n"+certSHA256))
+	// where certSHA256 is the certificate the hub saw. A machine in the middle
+	// presents a different certificate, so its proof never matches ours.
+	Proof string `json:"proof"`
+}
+
+// ExpectedPairProof is the proof a hub must send for code and this cert.
+func ExpectedPairProof(code, certSHA256 string) string {
+	m := hmac.New(sha256.New, []byte(config.NormalizePairCode(code)))
+	m.Write([]byte("caretaker-pair-v1\n" + certSHA256))
+	return hex.EncodeToString(m.Sum(nil))
+}
+
+func (s *Server) pairLockedOut() (bool, time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if time.Now().Before(s.pairLockUntil) {
+		return true, time.Until(s.pairLockUntil)
+	}
+	return false, 0
+}
+
+func (s *Server) recordPairFail(remote string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pairFails++
+	Logf("pair: wrong pairing code from %s (%d/%d)", remote, s.pairFails, maxPairFails)
+	if s.pairFails >= maxPairFails {
+		s.pairFails = 0
+		s.pairLockUntil = time.Now().Add(pairLockout)
+		Logf("pair: too many wrong codes — pairing disabled for %s", pairLockout)
+	}
 }
 
 func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if s.paired() {
-		http.Error(w, `{"error":"already paired"}`, http.StatusConflict)
+		writeErr(w, http.StatusConflict, "already paired")
+		return
+	}
+	if locked, wait := s.pairLockedOut(); locked {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(wait.Seconds())+1))
+		writeErr(w, http.StatusTooManyRequests, "too many wrong pairing codes — wait 15 minutes")
 		return
 	}
 	var req pairReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.HostID == "" || req.Token == "" || req.HubURL == "" {
-		http.Error(w, `{"error":"hostId, token, and hubUrl required"}`, http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "hostId, token, and hubUrl required")
+		return
+	}
+	if len(req.Token) < minTokenBytes {
+		writeErr(w, http.StatusBadRequest, "token too short")
+		return
+	}
+	if !strings.HasPrefix(req.HubURL, "http://") && !strings.HasPrefix(req.HubURL, "https://") {
+		writeErr(w, http.StatusBadRequest, "hubUrl must be http(s)")
 		return
 	}
 
 	s.mu.Lock()
+	code := s.cfg.PairCode
+	s.mu.Unlock()
+	if code == "" || s.cert == nil {
+		writeErr(w, http.StatusServiceUnavailable, "agent has no pairing code — run `caretaker-agent pair-code` on the PC")
+		return
+	}
+	expected := ExpectedPairProof(code, s.cert.SHA256)
+	if !hmac.Equal([]byte(strings.ToLower(req.Proof)), []byte(expected)) {
+		s.recordPairFail(r.RemoteAddr)
+		writeErr(w, http.StatusForbidden, "wrong pairing code — check the code shown on the PC")
+		return
+	}
+
+	s.mu.Lock()
+	if s.cfg.Paired() {
+		s.mu.Unlock()
+		writeErr(w, http.StatusConflict, "already paired")
+		return
+	}
+	s.pairFails = 0
+	s.cfg.PairCode = ""
 	s.cfg.HostID = req.HostID
 	s.cfg.Token = req.Token
 	s.cfg.HubURL = strings.TrimRight(req.HubURL, "/")
@@ -227,17 +341,77 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	if err := config.Save(s.cfgPath, &cfgCopy); err != nil {
-		http.Error(w, `{"error":"failed to save config"}`, http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "failed to save config")
 		return
 	}
-
-	s.StopBeacon()
+	Logf("pair: paired with hub %s (host %s) from %s", cfgCopy.HubURL, cfgCopy.HostID, r.RemoteAddr)
+	s.pairingChanged(cfgCopy)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":     true,
 		"hostId": req.HostID,
 		"paired": true,
 	})
+}
+
+func (s *Server) pairingChanged(cfg config.Config) {
+	if s.OnPairingChanged != nil {
+		go s.OnPairingChanged(cfg)
+	}
+}
+
+type rotateReq struct {
+	Token string `json:"token"`
+}
+
+// handleRotate swaps in a new bearer token chosen by the hub.
+func (s *Server) handleRotate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req rotateReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Token) < minTokenBytes {
+		writeErr(w, http.StatusBadRequest, "token of at least 32 characters required")
+		return
+	}
+	s.mu.Lock()
+	prev := s.cfg.Token
+	s.cfg.Token = req.Token
+	cfgCopy := *s.cfg
+	s.mu.Unlock()
+	if err := config.Save(s.cfgPath, &cfgCopy); err != nil {
+		s.mu.Lock()
+		s.cfg.Token = prev
+		s.mu.Unlock()
+		writeErr(w, http.StatusInternalServerError, "failed to save config")
+		return
+	}
+	Logf("rotate: bearer token replaced by hub (from %s)", r.RemoteAddr)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleUnpair forgets the hub; the agent goes back to advertising itself.
+func (s *Server) handleUnpair(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	s.mu.Lock()
+	if err := s.cfg.ClearPairing(); err != nil {
+		s.mu.Unlock()
+		writeErr(w, http.StatusInternalServerError, "failed to create pairing code")
+		return
+	}
+	cfgCopy := *s.cfg
+	s.mu.Unlock()
+	if err := config.Save(s.cfgPath, &cfgCopy); err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to save config")
+		return
+	}
+	Logf("unpair: hub removed this PC (from %s). New pairing code: %s", r.RemoteAddr, config.FormatPairCode(cfgCopy.PairCode))
+	s.pairingChanged(cfgCopy)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
@@ -262,7 +436,7 @@ type sleepReq struct {
 
 func (s *Server) handleSleep(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	var req sleepReq
@@ -271,8 +445,12 @@ func (s *Server) handleSleep(w http.ResponseWriter, r *http.Request) {
 	if mode == "" {
 		mode = "sleep"
 	}
+	if mode != "sleep" && mode != "hibernate" {
+		writeErr(w, http.StatusBadRequest, "mode must be sleep or hibernate")
+		return
+	}
 	if err := Sleep(mode); err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -285,12 +463,16 @@ type unlockReq struct {
 
 func (s *Server) handleUnlock(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	var req unlockReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Secret == "" {
-		http.Error(w, `{"error":"secret required"}`, http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "secret required")
+		return
+	}
+	if len(req.Secret) > 256 {
+		writeErr(w, http.StatusBadRequest, "secret too long")
 		return
 	}
 	if s.attemptsRemaining() <= 0 {
@@ -354,11 +536,11 @@ func (s *Server) handleUnlock(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePrepare(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if err := PrepareUnlock(); err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

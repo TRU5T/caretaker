@@ -2,6 +2,8 @@ const app = document.getElementById("app");
 
 const state = {
   authenticated: false,
+  mustChangePassword: false,
+  pairCodes: {},
   hosts: [],
   statuses: {},
   discovered: [],
@@ -30,6 +32,9 @@ async function api(path, opts = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
+    if (res.status === 403 && data.mustChangePassword) {
+      state.mustChangePassword = true;
+    }
     throw new Error(data.error || res.statusText || "request failed");
   }
   return data;
@@ -52,6 +57,7 @@ function hostStatus(id) {
 async function refreshAuth() {
   const me = await api("/me");
   state.authenticated = me.authenticated;
+  state.mustChangePassword = Boolean(me.mustChangePassword);
 }
 
 async function refreshHosts() {
@@ -146,7 +152,7 @@ function patchLiveStatus() {
 function startPolling() {
   stopPolling();
   state.pollTimer = setInterval(async () => {
-    if (!state.authenticated || state.pollInFlight) return;
+    if (!state.authenticated || state.mustChangePassword || state.pollInFlight) return;
     state.pollInFlight = true;
     try {
       if (state.tab === "home") {
@@ -187,16 +193,22 @@ function renderLogin() {
         <input id="password" type="password" autocomplete="current-password" placeholder="Password" />
       </label>
       <button id="loginBtn">Sign in</button>
-      <div class="meta">Default password is <code>changeme</code> unless you set <code>CARETAKER_UI_PASSWORD</code>.</div>
+      <div class="meta">First run? The password is whatever you set in <code>CARETAKER_UI_PASSWORD</code> (or <code>changeme</code>, which you will be asked to change).</div>
       ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ""}
     </div>
   `;
   const input = document.getElementById("password");
   const go = async () => {
     try {
-      await api("/login", { method: "POST", body: { password: input.value } });
+      const res = await api("/login", { method: "POST", body: { password: input.value } });
       state.authenticated = true;
+      state.mustChangePassword = Boolean(res.mustChangePassword);
       state.error = "";
+      if (state.mustChangePassword) {
+        state.currentPasswordHint = input.value;
+        render();
+        return;
+      }
       await refreshHosts();
       startPolling();
       render();
@@ -207,6 +219,72 @@ function renderLogin() {
   document.getElementById("loginBtn").onclick = go;
   input.addEventListener("keydown", (e) => e.key === "Enter" && go());
   input.focus();
+}
+
+function passwordFormHtml(prefix, { showCurrent = true } = {}) {
+  return `
+      ${showCurrent ? `<label>Current password
+        <input id="${prefix}Current" type="password" autocomplete="current-password" />
+      </label>` : ""}
+      <label>New password (10+ characters)
+        <input id="${prefix}New" type="password" autocomplete="new-password" minlength="10" />
+      </label>
+      <label>Repeat new password
+        <input id="${prefix}Repeat" type="password" autocomplete="new-password" minlength="10" />
+      </label>
+      <button id="${prefix}Btn">Change password</button>`;
+}
+
+function bindPasswordForm(prefix, currentFallback, onDone) {
+  const btn = document.getElementById(`${prefix}Btn`);
+  if (!btn) return;
+  btn.onclick = async () => {
+    const current = document.getElementById(`${prefix}Current`)?.value ?? currentFallback ?? "";
+    const next = document.getElementById(`${prefix}New`).value;
+    const repeat = document.getElementById(`${prefix}Repeat`).value;
+    if (next !== repeat) {
+      setFlash(false, "New passwords do not match");
+      return;
+    }
+    try {
+      btn.disabled = true;
+      await api("/password", { method: "POST", body: { currentPassword: current, newPassword: next } });
+      await onDone();
+    } catch (err) {
+      btn.disabled = false;
+      setFlash(false, err.message);
+    }
+  };
+}
+
+function renderForcePasswordChange() {
+  const knowCurrent = Boolean(state.currentPasswordHint);
+  app.innerHTML = `
+    <div class="brand">
+      <div class="brand-head">
+        <img class="brand-logo" src="/icon-192.png" width="48" height="48" alt="" />
+        <div>
+          <h1>Caretaker</h1>
+          <p>Set a real password</p>
+        </div>
+      </div>
+    </div>
+    <div class="card stack">
+      <strong>Change the default password</strong>
+      <div class="meta">This Hub can unlock your PC. It still uses the default password, so anyone on your network could sign in. Pick a new one to continue.</div>
+      ${passwordFormHtml("force", { showCurrent: !knowCurrent })}
+      ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ""}
+    </div>
+  `;
+  bindPasswordForm("force", state.currentPasswordHint, async () => {
+    state.currentPasswordHint = "";
+    state.mustChangePassword = false;
+    state.message = "Password changed";
+    state.error = "";
+    await refreshHosts();
+    startPolling();
+    render();
+  });
 }
 
 function renderHome() {
@@ -498,13 +576,13 @@ function renderInstallerCard() {
     </div>`;
   }
   const sha = info.sha256 ? String(info.sha256) : "";
-  const shaShort = sha ? `${sha.slice(0, 16)}…` : "";
   return `
     <div class="card stack">
       <strong>Install on this PC</strong>
       <div class="meta">Download the installer, double-click it, and accept the Windows admin prompt. No Command Prompt needed. This PC then appears under Nearby PCs — tap Pair.</div>
       <a class="btn" href="/api/agent/windows" download="caretaker-agent-setup.exe">Download installer</a>
-      <div class="meta" title="${escapeHtml(sha)}">v${escapeHtml(info.version || "")} · ${escapeHtml(formatBytes(info.size))}${shaShort ? ` · SHA-256 ${escapeHtml(shaShort)}` : ""}</div>
+      <div class="meta">v${escapeHtml(info.version || "")} · ${escapeHtml(formatBytes(info.size))}</div>
+      ${sha ? `<div class="meta">SHA-256 (compare with <code>Get-FileHash</code> on the PC):<code style="display:block;word-break:break-all;margin-top:4px;user-select:all">${escapeHtml(sha)}</code></div>` : ""}
       <div class="meta">Windows may say the app is unsigned. More info → Run anyway. That is expected.</div>
     </div>`;
 }
@@ -515,7 +593,7 @@ function renderSetupPanel() {
     ${renderInstallerCard()}
     <div class="card stack">
       <strong>Nearby PCs</strong>
-      <div class="meta">After the installer finishes, this PC shows up here. Tap Pair.</div>
+      <div class="meta">After the installer finishes, this PC shows up here. Enter the pairing code the installer showed on the PC, then tap Pair.</div>
       ${
         state.discovered.length === 0
           ? `<div class="meta">No unpaired agents seen yet. Make sure the agent is running on the same LAN.</div>`
@@ -528,7 +606,14 @@ function renderSetupPanel() {
                 <div class="meta">${escapeHtml(a.preferredMac || a.macs?.[0] || "MAC unknown")}</div>
                 <div class="meta">${escapeHtml((a.addresses || []).join(", "))}</div>
               </div>
-              <button data-pair-url="${escapeHtml(a.agentUrls?.[0] || "")}" data-pair-mac="${escapeHtml(a.preferredMac || "")}" data-pair-name="${escapeHtml(a.hostname)}">Pair</button>
+              <div class="stack" style="gap:6px;align-items:flex-end">
+                ${
+                  a.tls
+                    ? `<input data-pair-code-for="${escapeHtml(a.id)}" placeholder="XXXXX-XXXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" style="width:9.5rem;text-transform:uppercase" value="${escapeHtml(state.pairCodes[a.id] || "")}" />
+                <button data-pair-id="${escapeHtml(a.id)}" data-pair-url="${escapeHtml(a.agentUrls?.[0] || "")}" data-pair-mac="${escapeHtml(a.preferredMac || "")}" data-pair-name="${escapeHtml(a.hostname)}">Pair</button>`
+                    : `<div class="meta">Old agent — reinstall with the installer above to pair securely.</div>`
+                }
+              </div>
             </div>`
               )
               .join("")
@@ -548,10 +633,17 @@ function renderSetupPanel() {
                 <div>
                   <div>${escapeHtml(h.name)} ${h.paired ? '<span class="badge on">paired</span>' : '<span class="badge">unpaired</span>'}</div>
                   <div class="meta">${escapeHtml(h.mac)} ${h.agentUrl ? "· " + escapeHtml(h.agentUrl) : ""}</div>
+                  ${
+                    h.paired
+                      ? h.agentCertSha256
+                        ? `<div class="meta" title="${escapeHtml(h.agentCertSha256)}">TLS pinned · ${escapeHtml(h.agentCertSha256.slice(0, 16))}…</div>`
+                        : `<div class="meta">Plain HTTP (old agent) — update the agent to encrypt traffic</div>`
+                      : ""
+                  }
                 </div>
-                <div style="display:flex;gap:6px">
-                  ${h.paired ? "" : `<button class="secondary" data-repair="${h.id}">Code</button>`}
-                  <button class="danger" data-del="${h.id}">Delete</button>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+                  ${h.paired ? `<button class="secondary" data-rotate="${h.id}">New token</button>` : `<button class="secondary" data-repair="${h.id}">Code</button>`}
+                  <button class="danger" data-del="${h.id}" data-del-name="${escapeHtml(h.name)}">Unpair</button>
                 </div>
               </div>
             </div>`
@@ -572,10 +664,17 @@ function renderSetupPanel() {
             ? `<div class="ok">
                 <div>Code: <code style="font-size:1.3rem">${escapeHtml(state.pairing.pairingCode)}</code></div>
                 <div class="meta">Expires ${escapeHtml(state.pairing.expiresAt)}</div>
-                <code style="display:block;white-space:pre-wrap;font-size:0.75rem;margin-top:8px">caretaker-agent pair --hub ${escapeHtml(hubUrl)} --code ${escapeHtml(state.pairing.pairingCode)} --agent-url http://&lt;PC_IP&gt;:7842</code>
+                <code style="display:block;white-space:pre-wrap;font-size:0.75rem;margin-top:8px">caretaker-agent pair --hub ${escapeHtml(hubUrl)} --code ${escapeHtml(state.pairing.pairingCode)} --agent-url https://&lt;PC_IP&gt;:7842</code>
               </div>`
             : ""
         }
+      </div>
+    </details>
+    <details class="card">
+      <summary style="cursor:pointer;color:var(--muted)">Change Hub password</summary>
+      <div class="stack" style="margin-top:12px">
+        ${passwordFormHtml("setupPw")}
+        <div class="meta">Changing the password signs out every other browser.</div>
       </div>
     </details>
   `;
@@ -587,16 +686,29 @@ function bindSetupPanel() {
     render();
   });
 
+  document.querySelectorAll("[data-pair-code-for]").forEach((input) => {
+    input.addEventListener("input", () => {
+      state.pairCodes[input.getAttribute("data-pair-code-for")] = input.value;
+    });
+  });
+
   document.querySelectorAll("[data-pair-url]").forEach((btn) => {
     btn.onclick = async () => {
       const agentUrl = btn.getAttribute("data-pair-url");
       if (!agentUrl) return;
+      const id = btn.getAttribute("data-pair-id");
+      const pairCode = (state.pairCodes[id] || "").trim();
+      if (!pairCode) {
+        setFlash(false, "Enter the pairing code shown on the PC first");
+        return;
+      }
       try {
         btn.disabled = true;
         const data = await api("/discovered/pair", {
           method: "POST",
           body: {
             agentUrl,
+            pairCode,
             mac: btn.getAttribute("data-pair-mac") || undefined,
             name: btn.getAttribute("data-pair-name") || undefined,
           },
@@ -604,9 +716,11 @@ function bindSetupPanel() {
         await refreshHosts();
         await refreshDiscovered();
         state.selectedId = data.host?.id || state.selectedId;
+        delete state.pairCodes[id];
         state.tab = "home";
         setFlash(true, `Paired ${data.host?.name || "PC"}`);
       } catch (err) {
+        btn.disabled = false;
         setFlash(false, err.message);
       }
     };
@@ -659,21 +773,44 @@ function bindSetupPanel() {
     };
   });
 
-  document.querySelectorAll("[data-del]").forEach((btn) => {
+  document.querySelectorAll("[data-rotate]").forEach((btn) => {
     btn.onclick = async () => {
       try {
-        await api(`/hosts/${btn.getAttribute("data-del")}`, { method: "DELETE" });
-        await refreshHosts();
-        render();
+        btn.disabled = true;
+        await api(`/hosts/${btn.getAttribute("data-rotate")}/rotate-token`, { method: "POST", body: {} });
+        setFlash(true, "Issued a new agent token — the old one no longer works");
       } catch (err) {
+        btn.disabled = false;
         setFlash(false, err.message);
       }
     };
+  });
+
+  document.querySelectorAll("[data-del]").forEach((btn) => {
+    btn.onclick = async () => {
+      const name = btn.getAttribute("data-del-name") || "this PC";
+      if (!confirm(`Unpair ${name}? The PC forgets this Hub and must be paired again.`)) return;
+      try {
+        btn.disabled = true;
+        const data = await api(`/hosts/${btn.getAttribute("data-del")}`, { method: "DELETE" });
+        await refreshHosts();
+        if (data.warning) setFlash(false, data.warning);
+        else setFlash(true, `Unpaired ${name}`);
+      } catch (err) {
+        btn.disabled = false;
+        setFlash(false, err.message);
+      }
+    };
+  });
+
+  bindPasswordForm("setupPw", null, async () => {
+    setFlash(true, "Password changed — other browsers were signed out");
   });
 }
 
 function render() {
   if (!state.authenticated) renderLogin();
+  else if (state.mustChangePassword) renderForcePasswordChange();
   else renderHome();
 }
 
@@ -682,7 +819,8 @@ function escapeHtml(s) {
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function relTime(iso) {
@@ -696,7 +834,7 @@ function relTime(iso) {
 (async function init() {
   try {
     await refreshAuth();
-    if (state.authenticated) {
+    if (state.authenticated && !state.mustChangePassword) {
       await refreshHosts();
       startPolling();
     }

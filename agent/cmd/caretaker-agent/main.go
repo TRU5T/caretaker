@@ -21,6 +21,12 @@ func main() {
 		case "pair":
 			pairCmd(os.Args[2:])
 			return
+		case "pair-code":
+			pairCodeCmd()
+			return
+		case "unpair":
+			unpairCmd()
+			return
 		case "run":
 			runCmd(os.Args[2:])
 			return
@@ -82,7 +88,7 @@ func pairCmd(args []string) {
 	fs := flag.NewFlagSet("pair", flag.ExitOnError)
 	hub := fs.String("hub", "", "hub base URL, e.g. http://10.0.1.10:8080")
 	code := fs.String("code", "", "pairing code from hub UI")
-	agentURL := fs.String("agent-url", "", "how the hub reaches this agent, e.g. http://10.0.1.50:7842")
+	agentURL := fs.String("agent-url", "", "how the hub reaches this agent, e.g. https://10.0.1.50:7842")
 	mac := fs.String("mac", "", "optional MAC override (hub already has it from Add PC)")
 	name := fs.String("name", "", "optional display name override")
 	cfgPath := fs.String("config", config.DefaultPath(), "path to write agent config.json")
@@ -99,6 +105,44 @@ func pairCmd(args []string) {
 		fatal(err)
 	}
 	fmt.Println("pairing complete; config written to", *cfgPath)
+	if err := svc.Restart(); err != nil {
+		fmt.Println("restart the Caretaker Agent service to apply:", err)
+	}
+}
+
+// pairCodeCmd prints the code to enter in the Hub (needs administrator:
+// the config folder is readable only by SYSTEM and Administrators).
+func pairCodeCmd() {
+	code, err := config.EnsurePairCode(config.DefaultPath())
+	if err != nil {
+		fatal(fmt.Errorf("%w (run from an administrator prompt)", err))
+	}
+	if code == "" {
+		cfg, _ := config.LoadOrCreate(config.DefaultPath())
+		fmt.Printf("already paired with %s — run `caretaker-agent unpair` first to pair again\n", cfg.HubURL)
+		return
+	}
+	fmt.Println("Pairing code:", config.FormatPairCode(code))
+}
+
+// unpairCmd forgets the hub locally, e.g. when the hub was lost or its
+// address changed. Needs administrator.
+func unpairCmd() {
+	path := config.DefaultPath()
+	cfg, err := config.LoadOrCreate(path)
+	if err != nil {
+		fatal(err)
+	}
+	if err := cfg.ClearPairing(); err != nil {
+		fatal(err)
+	}
+	if err := config.Save(path, cfg); err != nil {
+		fatal(fmt.Errorf("%w (run from an administrator prompt)", err))
+	}
+	if err := svc.Restart(); err != nil {
+		fmt.Println("restart the Caretaker Agent service to apply:", err)
+	}
+	fmt.Println("Unpaired. New pairing code:", config.FormatPairCode(cfg.PairCode))
 }
 
 func unlockHelperCmd() {
@@ -149,6 +193,8 @@ Usage:
   caretaker-agent setup [--uninstall]
   caretaker-agent run [--config path]
   caretaker-agent pair --hub URL --code CODE --agent-url URL [--mac MAC] [--name NAME]
+  caretaker-agent pair-code       show the code to enter in the Hub (administrator)
+  caretaker-agent unpair          forget the Hub and issue a new code (administrator)
   caretaker-agent install|uninstall|start|stop
   caretaker-agent version
 

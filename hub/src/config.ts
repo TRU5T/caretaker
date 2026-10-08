@@ -13,6 +13,15 @@ export interface HubConfig {
   wakingUntil: Record<string, string>;
   /** Active pairing codes */
   pairings: PairingRecord[];
+  /**
+   * Mixed into every session signature. Rotating it (on password change)
+   * invalidates all existing sessions.
+   */
+  sessionEpoch: string;
+  /** True while the UI password is still the shipped default */
+  mustChangePassword: boolean;
+  /** Logged-out session ids → expiry (ms). Pruned once the cookie would have expired anyway. */
+  revokedSessions: Record<string, number>;
 }
 
 export interface PairingRecord {
@@ -25,6 +34,64 @@ export interface PairingRecord {
 }
 
 const DEFAULT_PORT = 8080;
+const DEFAULT_PASSWORD = "changeme";
+const MIN_SECRET_LENGTH = 32;
+
+/** Placeholder secrets that have appeared in this repo's docs and examples. */
+const KNOWN_PLACEHOLDER_SECRETS = new Set([
+  "dev-session-secret-change-me",
+  "replace-with-openssl-rand-hex-32",
+  "changeme",
+  "change-me",
+  "secret",
+]);
+
+/** Pairing-code alphabet: no 0/O/1/I/L to avoid misreads. 32 symbols = 5 bits each. */
+const CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+
+export function randomCode(length: number): string {
+  let out = "";
+  while (out.length < length) {
+    for (const b of crypto.randomBytes(length)) {
+      // Rejection sampling keeps the distribution uniform
+      if (b < 256 - (256 % CODE_ALPHABET.length)) out += CODE_ALPHABET[b % CODE_ALPHABET.length];
+      if (out.length === length) break;
+    }
+  }
+  return out;
+}
+
+export function isDefaultPassword(password: string): boolean {
+  return password === DEFAULT_PASSWORD;
+}
+
+/**
+ * Use CARETAKER_SESSION_SECRET only if it is long and not a published
+ * placeholder; otherwise fall back to a random secret persisted in config.
+ * A guessable secret would let anyone forge a login cookie.
+ */
+function resolveSessionSecret(persisted: string | undefined): string {
+  const env = process.env.CARETAKER_SESSION_SECRET?.trim();
+  if (env) {
+    if (KNOWN_PLACEHOLDER_SECRETS.has(env.toLowerCase())) {
+      console.warn(
+        "WARNING: CARETAKER_SESSION_SECRET is a published placeholder value and is being ignored. " +
+          "Using a random secret stored in config.json instead."
+      );
+    } else if (env.length < MIN_SECRET_LENGTH) {
+      console.warn(
+        `WARNING: CARETAKER_SESSION_SECRET is shorter than ${MIN_SECRET_LENGTH} characters and is being ignored. ` +
+          "Generate one with: openssl rand -hex 32"
+      );
+    } else {
+      return env;
+    }
+  }
+  if (persisted && persisted.length >= MIN_SECRET_LENGTH && !KNOWN_PLACEHOLDER_SECRETS.has(persisted.toLowerCase())) {
+    return persisted;
+  }
+  return crypto.randomBytes(32).toString("hex");
+}
 
 export function dataDir(): string {
   return process.env.CARETAKER_DATA || path.resolve(process.cwd(), "../data");
@@ -53,26 +120,40 @@ export function verifyPassword(password: string, stored: string): boolean {
 
 export function ensureConfig(): HubConfig {
   const dir = dataDir();
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = configPath();
   if (!fs.existsSync(file)) {
-    const password = process.env.CARETAKER_UI_PASSWORD || "changeme";
+    const password = process.env.CARETAKER_UI_PASSWORD || DEFAULT_PASSWORD;
     const cfg: HubConfig = {
       uiPasswordHash: hashPassword(password),
-      sessionSecret: process.env.CARETAKER_SESSION_SECRET || crypto.randomBytes(32).toString("hex"),
+      sessionSecret: resolveSessionSecret(undefined),
       hosts: [],
       heartbeats: {},
       wakingUntil: {},
       pairings: [],
+      sessionEpoch: crypto.randomBytes(16).toString("hex"),
+      mustChangePassword: isDefaultPassword(password),
+      revokedSessions: {},
     };
     saveConfig(cfg);
     return cfg;
   }
-  const raw = JSON.parse(fs.readFileSync(file, "utf8")) as HubConfig;
+  const text = fs.readFileSync(file, "utf8");
+  const raw = JSON.parse(text) as HubConfig;
   raw.hosts ||= [];
   raw.heartbeats ||= {};
   raw.wakingUntil ||= {};
   raw.pairings ||= [];
+  raw.revokedSessions ||= {};
+  raw.sessionEpoch ||= crypto.randomBytes(16).toString("hex");
+  if (raw.mustChangePassword == null) {
+    raw.mustChangePassword = verifyPassword(DEFAULT_PASSWORD, raw.uiPasswordHash);
+  }
+  const secret = resolveSessionSecret(raw.sessionSecret);
+  if (secret !== raw.sessionSecret) {
+    // Older installs may have persisted a placeholder; replacing it signs everyone out.
+    raw.sessionSecret = secret;
+  }
   // Migrate older host records
   for (const h of raw.hosts as Array<HostConfig & { paired?: boolean }>) {
     if (h.paired == null) {
@@ -83,8 +164,14 @@ export function ensureConfig(): HubConfig {
     // Allow resetting UI password from env on boot when CARETAKER_RESET_PASSWORD=1
     if (process.env.CARETAKER_RESET_PASSWORD === "1") {
       raw.uiPasswordHash = hashPassword(process.env.CARETAKER_UI_PASSWORD);
-      saveConfig(raw);
+      raw.mustChangePassword = isDefaultPassword(process.env.CARETAKER_UI_PASSWORD);
+      raw.sessionEpoch = crypto.randomBytes(16).toString("hex");
     }
+  }
+  // Persist migrations and tighten permissions left by older versions
+  const looseMode = process.platform !== "win32" && (fs.statSync(file).mode & 0o077) !== 0;
+  if (JSON.stringify(raw, null, 2) !== text || looseMode) {
+    saveConfig(raw);
   }
   return raw;
 }
@@ -92,7 +179,9 @@ export function ensureConfig(): HubConfig {
 export function saveConfig(cfg: HubConfig): void {
   const file = configPath();
   const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
+  // config.json holds agent bearer tokens and the session secret: owner-only
+  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+  fs.chmodSync(tmp, 0o600);
   fs.renameSync(tmp, file);
 }
 

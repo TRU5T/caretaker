@@ -2,8 +2,11 @@ package svc
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -41,23 +44,30 @@ func (p *program) run() {
 	if err := agent.RedirectCrashOutput(filepath.Join(filepath.Dir(p.cfgPath), "agent-crash.log")); err != nil {
 		agent.Logf("service: crash log unavailable: %v", err)
 	}
-	agent.Logf("service start pid=%d listen=%s paired=%v log=%s", os.Getpid(), p.cfg.ListenAddr, p.cfg.Token != "" && p.cfg.HostID != "", logPath)
+	agent.Logf("service start pid=%d listen=%s paired=%v log=%s", os.Getpid(), p.cfg.ListenAddr, p.cfg.Paired(), logPath)
 
 	p.stop = make(chan struct{})
-	srv := agent.NewServer(p.cfgPath, p.cfg)
+	srv, httpServer, err := buildServer(p.cfgPath, p.cfg)
+	if err != nil {
+		agent.Logf("service stop: %v", err)
+		return
+	}
+	exe, _ := os.Executable()
+	srv.OnPairingChanged = func(cfg config.Config) {
+		if exe != "" {
+			configureFirewall(exe, srv.ListenPort(), firewallScope(cfg))
+		}
+	}
+	srv.OnPairingChanged(*p.cfg)
 	agent.SafeGo("heartbeat", func() { srv.StartHeartbeat(p.stop) })
 	agent.SafeGo("beacon", func() { srv.StartBeacon(p.stop) })
 
-	p.server = &http.Server{
-		Addr:              p.cfg.ListenAddr,
-		Handler:           srv.Handler(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	fmt.Printf("caretaker-agent v%s listening on %s (paired=%v)\n", agent.Version, p.cfg.ListenAddr, p.cfg.Token != "" && p.cfg.HostID != "")
+	p.server = httpServer
+	fmt.Printf("caretaker-agent v%s listening on %s (TLS, paired=%v)\n", agent.Version, p.cfg.ListenAddr, p.cfg.Paired())
 	go p.logAlive()
 
 	// Always record why the listener stopped, so a silent exit is never a mystery.
-	err := p.server.ListenAndServe()
+	err = p.server.ListenAndServeTLS("", "")
 	if err == http.ErrServerClosed {
 		agent.Logf("service stop: listener closed cleanly")
 	} else {
@@ -77,6 +87,54 @@ func (p *program) logAlive() {
 			agent.Logf("alive")
 		}
 	}
+}
+
+// buildServer prepares the TLS certificate, the pairing code (if unpaired),
+// and an HTTPS server for the agent API.
+func buildServer(cfgPath string, cfg *config.Config) (*agent.Server, *http.Server, error) {
+	cert, err := config.LoadOrCreateCert(cfgPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("TLS certificate: %w", err)
+	}
+	agent.Logf("TLS certificate sha256=%s", cert.SHA256)
+	if !cfg.Paired() && cfg.PairCode == "" {
+		code, err := config.NewPairCode()
+		if err != nil {
+			return nil, nil, err
+		}
+		cfg.PairCode = code
+		if err := config.Save(cfgPath, cfg); err != nil {
+			return nil, nil, fmt.Errorf("save pairing code: %w", err)
+		}
+	}
+	if !cfg.Paired() {
+		agent.Logf("unpaired — pairing code: %s (enter it in the Hub when you tap Pair)", config.FormatPairCode(cfg.PairCode))
+	}
+	srv := agent.NewServer(cfgPath, cfg, cert)
+	return srv, &http.Server{
+		Addr:              cfg.ListenAddr,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{cert.TLS},
+			MinVersion:   tls.VersionTLS12,
+		},
+	}, nil
+}
+
+// firewallScope narrows inbound access to the hub's address once paired.
+// A hub URL with a DNS name falls back to the local subnet.
+func firewallScope(cfg config.Config) string {
+	if cfg.Paired() && cfg.HubURL != "" {
+		if u, err := url.Parse(cfg.HubURL); err == nil {
+			if ip := net.ParseIP(u.Hostname()); ip != nil {
+				return ip.String()
+			}
+		}
+	}
+	return "localsubnet"
 }
 
 func (p *program) Stop(_ service.Service) error {
@@ -121,25 +179,22 @@ func Run(cfgPath string, cfg *config.Config) error {
 	defer close(stop)
 	logPath := filepath.Join(filepath.Dir(cfgPath), "agent.log")
 	agent.SetLogPath(logPath)
-	agent.Logf("foreground start listen=%s paired=%v", cfg.ListenAddr, cfg.Token != "" && cfg.HostID != "")
-	srv := agent.NewServer(cfgPath, cfg)
+	agent.Logf("foreground start listen=%s paired=%v", cfg.ListenAddr, cfg.Paired())
+	srv, httpServer, err := buildServer(cfgPath, cfg)
+	if err != nil {
+		return err
+	}
 	go srv.StartHeartbeat(stop)
 	go srv.StartBeacon(stop)
-
-	httpServer := &http.Server{
-		Addr:              cfg.ListenAddr,
-		Handler:           srv.Handler(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
 	prg.server = httpServer
 
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Printf("caretaker-agent v%s listening on %s (paired=%v)\n", agent.Version, cfg.ListenAddr, cfg.Token != "" && cfg.HostID != "")
-		if cfg.Token == "" {
-			fmt.Println("unpaired — broadcasting on LAN; pair from the Caretaker Hub UI")
+		fmt.Printf("caretaker-agent v%s listening on %s (TLS, paired=%v)\n", agent.Version, cfg.ListenAddr, cfg.Paired())
+		if !cfg.Paired() {
+			fmt.Printf("unpaired — broadcasting on LAN. Pairing code: %s\n", config.FormatPairCode(cfg.PairCode))
 		}
-		errCh <- httpServer.ListenAndServe()
+		errCh <- httpServer.ListenAndServeTLS("", "")
 	}()
 
 	sig := make(chan os.Signal, 1)
@@ -174,7 +229,7 @@ func Control(action string) error {
 	if action == "install" {
 		configureRestartOnFailure("CaretakerAgent")
 		if exe, err := os.Executable(); err == nil {
-			configureFirewall(exe)
+			configureFirewall(exe, listenPort(cfg), firewallScope(*cfg))
 		}
 	}
 	if action == "uninstall" {
@@ -222,9 +277,38 @@ func InstallAndStart(executable string) error {
 		exe, _ = os.Executable()
 	}
 	if exe != "" {
-		configureFirewall(exe)
+		if cfg, err := config.LoadOrCreate(config.DefaultPath()); err == nil {
+			configureFirewall(exe, listenPort(cfg), firewallScope(*cfg))
+		}
 	}
 	return s.Start()
+}
+
+// Restart stops the service if it is running and starts it again so it
+// picks up config written by the CLI (pair / unpair).
+func Restart() error {
+	s, err := serviceHandle("")
+	if err != nil {
+		return err
+	}
+	if st, err := s.Status(); err != nil || st != service.StatusRunning {
+		return nil // not installed or not running: nothing to reload
+	}
+	if err := s.Stop(); err != nil {
+		return err
+	}
+	time.Sleep(500 * time.Millisecond)
+	return s.Start()
+}
+
+func listenPort(cfg *config.Config) int {
+	if _, port, err := net.SplitHostPort(cfg.ListenAddr); err == nil {
+		var p int
+		if _, err := fmt.Sscanf(port, "%d", &p); err == nil && p > 0 {
+			return p
+		}
+	}
+	return config.DefaultPort
 }
 
 // UninstallService stops and deletes the Windows service. Missing service is OK.

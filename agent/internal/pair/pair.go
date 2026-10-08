@@ -27,16 +27,28 @@ func Complete(opts Options) error {
 	if opts.HubURL == "" || opts.Code == "" || opts.AgentURL == "" {
 		return fmt.Errorf("--hub, --code, and --agent-url are required")
 	}
+	cert, err := config.LoadOrCreateCert(opts.ConfigPath)
+	if err != nil {
+		return err
+	}
+	// The agent only serves HTTPS now; the hub pins the certificate we send.
+	agentURL := strings.TrimRight(opts.AgentURL, "/")
+	if !strings.Contains(agentURL, "://") {
+		agentURL = "https://" + agentURL
+	}
+	agentURL = strings.Replace(agentURL, "http://", "https://", 1)
+
 	host, _ := os.Hostname()
 	name := opts.Name
 	if name == "" {
 		name = host
 	}
 	payload := map[string]string{
-		"pairingCode": strings.ToUpper(opts.Code),
-		"agentUrl":    strings.TrimRight(opts.AgentURL, "/"),
+		"pairingCode": config.NormalizePairCode(opts.Code),
+		"agentUrl":    agentURL,
 		"name":        name,
 		"hostname":    host,
+		"certPem":     cert.PEM,
 	}
 	if opts.MAC != "" {
 		payload["mac"] = opts.MAC
@@ -52,6 +64,10 @@ func Complete(opts Options) error {
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("pair failed (%d): %s", resp.StatusCode, string(b))
 	}
+	if strings.HasPrefix(opts.HubURL, "http://") {
+		fmt.Println("note: the hub URL is plain HTTP, so the token in this reply crossed the LAN unencrypted.")
+		fmt.Println("      Put the hub behind HTTPS, or use one-click pairing from the Hub UI instead.")
+	}
 	var out struct {
 		OK         bool   `json:"ok"`
 		HostID     string `json:"hostId"`
@@ -62,7 +78,10 @@ func Complete(opts Options) error {
 	if err := json.Unmarshal(b, &out); err != nil {
 		return err
 	}
-	u, err := parseListenFromAgentURL(opts.AgentURL)
+	if out.AgentToken == "" || out.HostID == "" {
+		return fmt.Errorf("hub reply missing token or host id")
+	}
+	u, err := parseListenFromAgentURL(agentURL)
 	if err != nil {
 		u = fmt.Sprintf(":%d", config.DefaultPort)
 	}

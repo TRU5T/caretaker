@@ -27,7 +27,7 @@ Caretaker Hub runs on your Unraid box and talks to a small Windows agent on your
 After install:
 1. Open the WebUI (or http://TOWER:PORT) and sign in with the UI password you set below.
 2. On the Windows PC: Hub → Setup → Download installer → run as Administrator.
-3. Pair the PC from Nearby PCs, then Wake / Unlock / Sleep from your phone.
+3. The installer shows a pairing code. Type it next to the PC under Nearby PCs and tap Pair, then Wake / Unlock / Sleep from your phone.
 
 Uses host networking. If 8080 is taken, set BOTH "WebUI Port" and "CARETAKER_PORT" to the same free port (e.g. 8060). The WebUI button follows WebUI Port.
 
@@ -64,12 +64,24 @@ Not malware, but privileged: anyone who can log into the Hub can wake, unlock, a
       <Name>CARETAKER_SESSION_SECRET</Name>
       <Mode/>
     </Variable>
+    <Variable>
+      <Value>99</Value>
+      <Name>CARETAKER_UID</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>100</Value>
+      <Name>CARETAKER_GID</Name>
+      <Mode/>
+    </Variable>
   </Environment>
   <Labels/>
-  <Config Name="Appdata" Target="/data" Default="/mnt/user/appdata/caretaker" Mode="rw" Description="Persistent Hub config (password hash, hosts, pairing codes)." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/caretaker</Config>
+  <Config Name="Appdata" Target="/data" Default="/mnt/user/appdata/caretaker" Mode="rw" Description="Persistent Hub config (password hash, hosts, agent tokens, pinned agent certificates). Owner-only permissions." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/caretaker</Config>
   <Config Name="CARETAKER_DATA" Target="CARETAKER_DATA" Default="/data" Mode="" Description="Leave as /data (matches the Appdata mount)." Type="Variable" Display="advanced" Required="true" Mask="false">/data</Config>
   <Config Name="WebUI Port" Target="8080" Default="8080" Mode="tcp" Description="Port used by Unraid's WebUI button. With host networking this is not a Docker port-map — set CARETAKER_PORT to the SAME number so the Hub listens here." Type="Port" Display="always" Required="true" Mask="false">8080</Config>
   <Config Name="CARETAKER_PORT" Target="CARETAKER_PORT" Default="8080" Mode="" Description="Port the Hub process binds on the Unraid host. Must match WebUI Port (e.g. both 8060)." Type="Variable" Display="always" Required="true" Mask="false">8080</Config>
-  <Config Name="UI Password" Target="CARETAKER_UI_PASSWORD" Default="" Mode="" Description="Hub login password. Used only on first start (when config.json is created). Pick something strong — default in the image path is changeme if left empty." Type="Variable" Display="always" Required="true" Mask="true"></Config>
-  <Config Name="Session Secret" Target="CARETAKER_SESSION_SECRET" Default="" Mode="" Description="HMAC secret for the session cookie. Generate once (e.g. openssl rand -hex 32) and keep it. Changing it signs everyone out." Type="Variable" Display="always" Required="true" Mask="true"></Config>
+  <Config Name="UI Password" Target="CARETAKER_UI_PASSWORD" Default="" Mode="" Description="Hub login password (10+ characters). Used only on first start (when config.json is created). If left empty it is changeme and the Hub forces you to change it at first sign-in." Type="Variable" Display="always" Required="true" Mask="true"></Config>
+  <Config Name="Session Secret" Target="CARETAKER_SESSION_SECRET" Default="" Mode="" Description="Optional HMAC secret for session cookies (32+ characters, e.g. openssl rand -hex 32). Leave empty to let the Hub generate one and keep it in appdata. Short or example values are ignored. Changing it signs everyone out." Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="Run as UID" Target="CARETAKER_UID" Default="99" Mode="" Description="The container starts as root only to fix appdata ownership, then runs the Hub as this user (99 = nobody)." Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
+  <Config Name="Run as GID" Target="CARETAKER_GID" Default="100" Mode="" Description="Group for the Hub process (100 = users)." Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
 </Container>

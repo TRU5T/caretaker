@@ -29,6 +29,10 @@ export interface HostConfig {
   apolloPort?: number;
   hostAddress?: string;
   agentToken: string;
+  /** Agent's self-signed TLS certificate (PEM), pinned at pairing */
+  agentCertPem?: string;
+  /** Lowercase hex SHA-256 of the pinned certificate */
+  agentCertSha256?: string;
   /** False until the Windows agent claims the pairing code */
   paired: boolean;
   createdAt: string;
@@ -45,6 +49,8 @@ export interface HostPublic {
   hostAddress: string;
   hasAgentToken: boolean;
   paired: boolean;
+  /** SHA-256 of the pinned agent certificate; absent for legacy plain-HTTP agents */
+  agentCertSha256?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -60,5 +66,5 @@ export interface HostLiveStatus {
 }
 
 export const AGENT_DEFAULT_PORT = 7842;
-export const HUB_VERSION = "0.1.0";
-export const AGENT_VERSION = "0.1.0";
+export const HUB_VERSION = "0.2.0";
+export const AGENT_VERSION = "0.2.0";

@@ -13,6 +13,9 @@ on:
 permissions:
   contents: read
   packages: write
+  # Keyless signing (cosign) and build attestations
+  id-token: write
+  attestations: write
 
 env:
   IMAGE_NAME: caretaker-hub
@@ -23,7 +26,7 @@ jobs:
     name: Build and push
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Image tags
         id: meta
@@ -33,15 +36,16 @@ jobs:
           echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
           echo "tags=${IMAGE}:latest,${IMAGE}:sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        id: build
         with:
           context: .
           file: hub/Dockerfile
@@ -54,6 +58,40 @@ jobs:
             org.opencontainers.image.licenses=MIT
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # SBOM + SLSA provenance attached to the image
+          sbom: true
+          provenance: mode=max
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Sign image (keyless, Sigstore)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ steps.meta.outputs.image }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Extract Windows installer and checksum
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ steps.meta.outputs.image }}
+        run: |
+          id="$(docker create "${IMAGE}@${DIGEST}")"
+          docker cp "$id:/app/downloads/caretaker-agent-setup.exe" .
+          docker cp "$id:/app/downloads/caretaker-agent-setup.exe.sha256" .
+          docker rm "$id"
+          sha256sum -c caretaker-agent-setup.exe.sha256
+          cat caretaker-agent-setup.exe.sha256 >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sign installer (keyless, Sigstore)
+        run: cosign sign-blob --yes --bundle caretaker-agent-setup.exe.sigstore.json caretaker-agent-setup.exe
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: caretaker-agent-setup
+          path: |
+            caretaker-agent-setup.exe
+            caretaker-agent-setup.exe.sha256
+            caretaker-agent-setup.exe.sigstore.json
 
       - name: Make package public
         continue-on-error: true

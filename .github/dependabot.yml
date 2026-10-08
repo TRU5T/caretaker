@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /hub
+    schedule:
+      interval: weekly
+    groups:
+      hub-deps:
+        patterns: ["*"]
+
+  - package-ecosystem: gomod
+    directory: /agent
+    schedule:
+      interval: weekly
+
+  # Keeps the digest-pinned base images in hub/Dockerfile current
+  - package-ecosystem: docker
+    directory: /hub
+    schedule:
+      interval: weekly
+
+  # Keeps SHA-pinned actions current
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

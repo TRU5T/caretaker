@@ -2,7 +2,11 @@ package agent
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"time"
@@ -20,9 +24,16 @@ func (s *Server) StartHeartbeat(stop <-chan struct{}) {
 		}
 		locked, state := DetectLockState()
 		host, _ := os.Hostname()
+		// The hub is usually plain HTTP, so never send the token itself:
+		// sign hostId+timestamp with it instead.
+		hostID := s.hostID()
+		ts := time.Now().UnixMilli()
+		mac := hmac.New(sha256.New, []byte(s.token()))
+		fmt.Fprintf(mac, "heartbeat\n%s\n%d", hostID, ts)
 		payload := map[string]any{
-			"hostId": s.hostID(),
-			"token":  s.token(),
+			"hostId": hostID,
+			"ts":     ts,
+			"sig":    hex.EncodeToString(mac.Sum(nil)),
 			"status": Status{
 				Online:                  true,
 				Locked:                  locked,
@@ -40,7 +51,6 @@ func (s *Server) StartHeartbeat(stop <-chan struct{}) {
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+s.token())
 		resp, err := client.Do(req)
 		if err != nil {
 			return
