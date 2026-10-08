@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// StartBeacon advertises this agent on the LAN until paired or stop is closed.
+// StartBeacon advertises this agent on the LAN while it is unpaired, until stop is closed.
 func (s *Server) StartBeacon(stop <-chan struct{}) {
 	conn, err := net.ListenPacket("udp4", ":0")
 	if err != nil {
@@ -35,16 +35,8 @@ func (s *Server) StartBeacon(stop <-chan struct{}) {
 		case <-stop:
 			return
 		case <-tick.C:
-			if s.paired() {
-				// Keep the goroutine alive but idle so a future unpair could resume later;
-				// for MVP just exit once paired.
-				return
-			}
+			// Silent while paired; resumes automatically after an unpair.
 			send()
 		}
 	}
-}
-
-func (s *Server) StopBeacon() {
-	// Pairing sets token/hostId; StartBeacon exits on next tick via paired().
 }

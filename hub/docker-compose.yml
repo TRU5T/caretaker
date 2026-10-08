@@ -11,8 +11,10 @@ services:
     environment:
       CARETAKER_DATA: /data
       CARETAKER_PORT: "8080"
-      # Set on first run; change via env or edit data/config.json
-      CARETAKER_UI_PASSWORD: ${CARETAKER_UI_PASSWORD:-changeme}
-      CARETAKER_SESSION_SECRET: ${CARETAKER_SESSION_SECRET:-dev-session-secret-change-me}
+      # First-run password. If unset it is "changeme" and the UI forces a change.
+      CARETAKER_UI_PASSWORD: ${CARETAKER_UI_PASSWORD:-}
+      # Optional: `openssl rand -hex 32`. If unset, a random secret is generated
+      # and stored in data/config.json. Never use a value copied from docs.
+      CARETAKER_SESSION_SECRET: ${CARETAKER_SESSION_SECRET:-}
     volumes:
       - ../data:/data

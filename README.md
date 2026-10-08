@@ -41,7 +41,7 @@ Apollo has no host WoL / sleep / unlock API, which is why this exists.
 
 - A Windows 10/11 gaming PC with Apollo (or Sunshine) and Moonlight on the client
 - An always-on Linux box on the **same LAN** for the Hub (Docker). Docker Desktop on macOS/Windows is a poor WoL host — UDP broadcast usually never leaves the VM.
-- Go 1.22+ only if you build the agent yourself (the Hub image already compiles the Windows installer)
+- Go 1.26+ only if you build the agent yourself (the Hub image already compiles the Windows installer)
 - Node 18+ only if you run the Hub outside Docker
 
 **Ports**
@@ -67,7 +67,7 @@ export CARETAKER_SESSION_SECRET="$(openssl rand -hex 32)"
 docker compose up -d --build
 ```
 
-Open `http://<hub-host>:8080`. If you skip the env vars, the password is `changeme` — change it immediately.
+Open `http://<hub-host>:8080`. If you skip `CARETAKER_UI_PASSWORD`, the password is `changeme` and the Hub makes you change it before anything else works. A missing, short, or placeholder `CARETAKER_SESSION_SECRET` is ignored in favour of a random one stored in `data/config.json`.
 
 `network_mode: host` is required so Wake-on-LAN broadcasts reach your LAN. Details: [`hub/README.md`](hub/README.md).
 
@@ -75,13 +75,13 @@ Open `http://<hub-host>:8080`. If you skip the env vars, the password is `change
 
 On the **gaming PC**, open the Hub → **Setup** → **Download installer**. Double-click `caretaker-agent-setup.exe` and accept the administrator prompt. The installer copies the agent to Program Files, starts the **Caretaker Agent** service, and opens a Windows Firewall rule for the LAN.
 
-Then tap **Pair** when the PC appears under **Nearby PCs**.
+The installer finishes by showing a **pairing code** (like `K7Q2M-9XW4C`). Back in the Hub, type that code next to the PC under **Nearby PCs** and tap **Pair**. Lost the code? Run `caretaker-agent pair-code` from an administrator prompt.
 
 That installer is the agent from **this repo**, compiled when you built the Hub image. Windows will likely SmartScreen it (unsigned). More info → Run anyway. Details: [SAFETY.md](SAFETY.md), [`agent/README.md`](agent/README.md).
 
-The unpaired agent broadcasts on UDP **7843**. Pair it promptly; until then, anyone on the LAN who can reach TCP **7842** can pair. After pairing, sleep/unlock require the Hub’s bearer token.
+The unpaired agent broadcasts on UDP **7843**. Pairing needs the code shown on the PC, so other devices on the LAN cannot claim it; five wrong codes lock pairing for 15 minutes. After pairing, the Hub talks to the agent over **HTTPS with the agent's certificate pinned**, and sleep/unlock require the Hub's bearer token.
 
-**Fallback (Command Prompt):** Setup → add the PC manually → run `caretaker-agent pair --hub … --code … --agent-url …`. Or build with `bash agent/build-windows.sh` / `go build` and `caretaker-agent.exe install`.
+**Fallback (Command Prompt):** Setup → add the PC manually → run `caretaker-agent pair --hub … --code … --agent-url https://…:7842`. Or build with `bash agent/build-windows.sh` / `go build` and `caretaker-agent.exe install`.
 
 ### 3. Couch flow
 
@@ -103,11 +103,12 @@ The unpaired agent broadcasts on UDP **7843**. Pair it promptly; until then, any
 
 Full model, AV notes, and “I didn’t install this” steps: **[SAFETY.md](SAFETY.md)**. Report vulnerabilities per **[SECURITY.md](SECURITY.md)**.
 
-- Hub UI is password-protected (session cookie)
-- Hub ↔ agent uses a **shared bearer token** after pairing
+- Hub UI is password-protected (signed, expiring session cookie; login is rate-limited; the default password must be changed on first sign-in)
+- Pairing requires a code shown on the PC, bound to the agent's TLS certificate
+- Hub ↔ agent traffic is **HTTPS with a pinned certificate**, authenticated by a bearer token you can rotate from Setup
 - Unlock PIN/password is **never stored on the hub** and is not logged (only length)
 - Unlock attempts are rate-limited (3 failures / 15 minutes) so a bad PIN does not lock Windows
-- **LAN-first:** HTTP, not HTTPS. Put a VPN (Tailscale, WireGuard) in front if you leave the house. Do not port-forward the Hub or agent.
+- **LAN-first:** the browser ↔ Hub leg is HTTP unless you add a reverse proxy. Put a VPN (Tailscale, WireGuard) in front if you leave the house. Do not port-forward the Hub or agent.
 - For reliable unlock, run the agent as a **Windows service** (SYSTEM) so it can reach the secure desktop
 
 <details>
@@ -148,27 +149,31 @@ Hub (`:8080`):
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
-| POST | `/api/login` | — | UI session |
+| POST | `/api/login` | — | UI session (rate-limited) |
+| POST | `/api/password` | UI | Change password (signs out other sessions) |
 | GET | `/api/agent/windows` | UI | Download Windows installer |
 | GET | `/api/agent/windows/info` | UI | Installer size / SHA-256 (or `{ available: false }`) |
 | GET | `/api/hosts` | UI | List hosts |
 | POST | `/api/hosts` | UI | Add PC (name+MAC) → returns pairing code |
 | POST | `/api/hosts/:id/pair` | UI | Re-issue pairing code for a host |
+| POST | `/api/hosts/:id/rotate-token` | UI | Issue a new agent bearer token |
+| DELETE | `/api/hosts/:id` | UI | Unpair (agent forgets the hub) and remove |
+| POST | `/api/discovered/pair` | UI | One-click pair; body includes the code shown on the PC |
 | POST | `/api/hosts/:id/wake` | UI | Send WoL |
 | POST | `/api/hosts/:id/sleep` | UI | Proxy sleep to agent |
 | POST | `/api/hosts/:id/unlock` | UI | Proxy PIN/password (body not logged) |
 | GET | `/api/hosts/:id/status` | UI | Aggregated state + Apollo probe |
-| POST | `/api/pair/complete` | agent | Claim pairing code for existing host |
-| POST | `/api/heartbeat` | agent token | Optional agent→hub heartbeat |
+| POST | `/api/pair/complete` | pairing code | Claim pairing code for existing host (rate-limited) |
+| POST | `/api/heartbeat` | HMAC of agent token | Agent→hub heartbeat (the token itself is never sent) |
 
-Agent (`:7842`): `GET /health`, `GET /discover`, `POST /pair` (unpaired only), then `GET /status`, `POST /sleep`, `POST /unlock`, `POST /prepare` — all except health/discover/pair require `Authorization: Bearer <token>`.
+Agent (`https://…:7842`, self-signed cert pinned by the Hub): `GET /health`, `GET /discover`, `POST /pair` (unpaired only; needs proof of the on-screen code), then `GET /status`, `POST /sleep`, `POST /unlock`, `POST /prepare`, `POST /rotate`, `POST /unpair` — all except health/discover/pair require `Authorization: Bearer <token>`.
 
 ## Limits (MVP)
 
 - Unlock uses secure-desktop key injection (not a custom Credential Provider). Hello-only accounts and some policies will not unlock.
 - No embedded Moonlight client — power/login companion only.
 - Apollo reachability is a best-effort HTTPS probe on port `47990`.
-- Agent binaries are **not Authenticode-signed**; SmartScreen is expected. The Hub serves the installer compiled at image build time.
+- Agent binaries are **not Authenticode-signed**; SmartScreen is expected. The Hub serves the installer compiled at image build time. The build is reproducible, and CI signs the image and installer with Sigstore (see [SAFETY.md](SAFETY.md#how-to-verify-a-binary)).
 
 ## License
 

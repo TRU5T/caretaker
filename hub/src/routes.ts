@@ -12,9 +12,11 @@ import {
   hostAddressFromAgentUrl,
   loadConfig,
   normalizeMac,
+  randomCode,
   saveConfig,
 } from "./config.js";
-import { AgentClient } from "./agentClient.js";
+import { clientFor, normalizeFingerprint } from "./agentClient.js";
+import { clientKey, FailureLimiter } from "./rateLimit.js";
 import { wakeHost } from "./wol.js";
 import { clearWaking, getLiveStatus, markWaking, recordHeartbeat } from "./status.js";
 import { listDiscovered, pairDiscovered } from "./discovery.js";
@@ -35,14 +37,63 @@ function toPublic(h: HostConfig): HostPublic {
     hostAddress: h.hostAddress || hostAddressFromAgentUrl(h.agentUrl),
     hasAgentToken: Boolean(h.agentToken),
     paired: Boolean(h.paired),
+    agentCertSha256: h.agentCertSha256,
     createdAt: h.createdAt,
     updatedAt: h.updatedAt,
   };
 }
 
+/** Unauthenticated agent-facing endpoints: 5 free failures per IP, then backoff; 30/10 min overall. */
+const agentEndpointLimiter = new FailureLimiter({
+  freeFailures: 5,
+  baseLockMs: 30_000,
+  maxLockMs: 15 * 60_000,
+  resetAfterMs: 60 * 60_000,
+  globalMax: 30,
+  globalWindowMs: 10 * 60_000,
+});
+
+const PAIRING_CODE_LENGTH = 10; // 50 bits from a 32-symbol alphabet
+
+/** Strip separators/whitespace so "ABCDE-FGHJK" and "abcdefghjk" both match. */
+function normalizeCode(code: string): string {
+  return code.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+}
+
+function formatCode(code: string): string {
+  return code.length === PAIRING_CODE_LENGTH ? `${code.slice(0, 5)}-${code.slice(5)}` : code;
+}
+
+function safeEqual(a: string, b: string): boolean {
+  const ha = crypto.createHash("sha256").update(a).digest();
+  const hb = crypto.createHash("sha256").update(b).digest();
+  return crypto.timingSafeEqual(ha, hb) && a.length === b.length;
+}
+
+function parseAgentUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/$/, "");
+  let u: URL;
+  try {
+    u = new URL(trimmed);
+  } catch {
+    throw new Error("agentUrl must be a full URL, e.g. https://192.168.1.50:7842");
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") {
+    throw new Error("agentUrl must use https://");
+  }
+  if (u.username || u.password || (u.pathname && u.pathname !== "/") || u.search || u.hash) {
+    throw new Error("agentUrl must be scheme://host:port only");
+  }
+  return `${u.protocol}//${u.host}`;
+}
+
+function pairCommand(code: string): string {
+  return `caretaker-agent pair --hub <HUB_URL> --code ${formatCode(code)} --agent-url https://<THIS_PC_IP>:7842`;
+}
+
 function createPairingForHost(cfg: ReturnType<typeof loadConfig>, hostId: string) {
-  const code = crypto.randomBytes(3).toString("hex").toUpperCase();
-  const token = crypto.randomBytes(24).toString("hex");
+  const code = randomCode(PAIRING_CODE_LENGTH);
+  const token = crypto.randomBytes(32).toString("hex");
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
   cfg.pairings = cfg.pairings.filter(
     (p) => p.hostId !== hostId && Date.parse(p.expiresAt) > Date.now() && !p.claimed
@@ -98,9 +149,9 @@ api.post("/hosts", requireAuth, (req, res) => {
     saveConfig(cfg);
     res.status(201).json({
       host: toPublic(host),
-      pairingCode: pairing.pairingCode,
+      pairingCode: formatCode(pairing.pairingCode),
       expiresAt: pairing.expiresAt,
-      pairCommand: `caretaker-agent pair --hub <HUB_URL> --code ${pairing.pairingCode} --agent-url http://<THIS_PC_IP>:7842`,
+      pairCommand: pairCommand(pairing.pairingCode),
     });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
@@ -122,9 +173,9 @@ api.post("/hosts/:id/pair", requireAuth, (req, res) => {
   saveConfig(cfg);
   res.json({
     host: toPublic(host),
-    pairingCode: pairing.pairingCode,
+    pairingCode: formatCode(pairing.pairingCode),
     expiresAt: pairing.expiresAt,
-    pairCommand: `caretaker-agent pair --hub <HUB_URL> --code ${pairing.pairingCode} --agent-url http://<THIS_PC_IP>:7842`,
+    pairCommand: pairCommand(pairing.pairingCode),
   });
 });
 
@@ -137,14 +188,19 @@ api.put("/hosts/:id", requireAuth, (req, res) => {
   }
   try {
     const current = cfg.hosts[idx];
+    let agentUrl = current.agentUrl;
+    if (req.body?.agentUrl != null) {
+      agentUrl = parseAgentUrl(String(req.body.agentUrl));
+      // Never let an edit downgrade a pinned agent to plain HTTP (the token would leak)
+      if (current.agentCertSha256 && !agentUrl.startsWith("https://")) {
+        throw new Error("this agent uses a pinned TLS certificate — agentUrl must be https://");
+      }
+    }
     const next: HostConfig = {
       ...current,
       name: req.body?.name != null ? String(req.body.name).trim() : current.name,
       mac: req.body?.mac != null ? normalizeMac(String(req.body.mac)) : current.mac,
-      agentUrl:
-        req.body?.agentUrl != null
-          ? String(req.body.agentUrl).replace(/\/$/, "")
-          : current.agentUrl,
+      agentUrl,
       broadcastAddress:
         req.body?.broadcastAddress != null
           ? String(req.body.broadcastAddress)
@@ -169,17 +225,65 @@ api.put("/hosts/:id", requireAuth, (req, res) => {
   }
 });
 
-api.delete("/hosts/:id", requireAuth, (req, res) => {
-  const cfg = loadConfig();
-  const before = cfg.hosts.length;
-  cfg.hosts = cfg.hosts.filter((h) => h.id !== req.params.id);
-  delete cfg.heartbeats[req.params.id];
-  delete cfg.wakingUntil[req.params.id];
-  if (cfg.hosts.length === before) {
+/** Unpair: tell the agent to forget its token (best effort), then forget the host. */
+api.delete("/hosts/:id", requireAuth, async (req, res) => {
+  const host = findHost(req.params.id);
+  if (!host) {
     res.status(404).json({ error: "host not found" });
     return;
   }
+  let agentUnpaired = false;
+  let agentError: string | undefined;
+  if (host.paired && host.agentUrl && host.agentToken) {
+    try {
+      await (await clientFor(host)).unpair();
+      agentUnpaired = true;
+    } catch (err) {
+      agentError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  const cfg = loadConfig();
+  cfg.hosts = cfg.hosts.filter((h) => h.id !== host.id);
+  cfg.pairings = cfg.pairings.filter((p) => p.hostId !== host.id);
+  delete cfg.heartbeats[host.id];
+  delete cfg.wakingUntil[host.id];
   saveConfig(cfg);
+  res.json({
+    ok: true,
+    agentUnpaired,
+    warning: agentError
+      ? `Removed from the hub, but the PC could not be reached to unpair (${agentError}). ` +
+        "Its old token stops working only once the agent is unpaired: run `caretaker-agent unpair` on the PC as administrator."
+      : undefined,
+  });
+});
+
+/** Replace the hub↔agent bearer token (e.g. after a suspected leak). */
+api.post("/hosts/:id/rotate-token", requireAuth, async (req, res) => {
+  const host = findHost(req.params.id);
+  if (!host) {
+    res.status(404).json({ error: "host not found" });
+    return;
+  }
+  if (!host.paired) {
+    res.status(400).json({ error: "host is not paired" });
+    return;
+  }
+  const newToken = crypto.randomBytes(32).toString("hex");
+  try {
+    await (await clientFor(host)).rotateToken(newToken);
+  } catch (err) {
+    res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+    return;
+  }
+  const cfg = loadConfig();
+  const stored = cfg.hosts.find((h) => h.id === host.id);
+  if (stored) {
+    stored.agentToken = newToken;
+    stored.updatedAt = new Date().toISOString();
+    saveConfig(cfg);
+  }
+  console.log(`rotate-token host=${host.id} ok`);
   res.json({ ok: true });
 });
 
@@ -216,7 +320,7 @@ api.post("/hosts/:id/sleep", requireAuth, async (req, res) => {
   }
   const mode = req.body?.mode === "hibernate" ? "hibernate" : "sleep";
   try {
-    const client = new AgentClient(host.agentUrl, host.agentToken);
+    const client = await clientFor(host);
     await client.sleep(mode);
     clearWaking(host.id);
     res.json({ ok: true, mode });
@@ -238,7 +342,7 @@ api.post("/hosts/:id/unlock", requireAuth, async (req, res) => {
     return;
   }
   try {
-    const client = new AgentClient(host.agentUrl, host.agentToken);
+    const client = await clientFor(host);
     const started = Date.now();
     const result = await client.unlock(secret, kind);
     console.log(
@@ -260,7 +364,7 @@ api.post("/hosts/:id/prepare", requireAuth, async (req, res) => {
     return;
   }
   try {
-    const client = new AgentClient(host.agentUrl, host.agentToken);
+    const client = await clientFor(host);
     const started = Date.now();
     const result = await client.prepare();
     console.log(`prepare host=${host.id} ok ms=${Date.now() - started} msg=${result.message || ""}`);
@@ -273,14 +377,42 @@ api.post("/hosts/:id/prepare", requireAuth, async (req, res) => {
   }
 });
 
-/** Agent → hub heartbeat (authenticated with host agent token) */
+const HEARTBEAT_MAX_SKEW_MS = 5 * 60_000;
+
+/**
+ * Agent → hub heartbeat. The hub usually runs plain HTTP, so current agents
+ * never send the token itself: they send HMAC(token, "heartbeat\n<hostId>\n<ts>").
+ * Agents from before 0.2 sent the raw token; that is still accepted.
+ */
 api.post("/heartbeat", (req, res) => {
   const hostId = String(req.body?.hostId || "");
-  const token = String(req.body?.token || req.headers.authorization?.replace(/^Bearer\s+/i, "") || "");
   const host = findHost(hostId);
-  if (!host || !token || token !== host.agentToken) {
-    res.status(401).json({ error: "unauthorized" });
+  const deny = () => res.status(401).json({ error: "unauthorized" });
+  if (!host || !host.agentToken) {
+    deny();
     return;
+  }
+  const sig = String(req.body?.sig || "");
+  if (sig) {
+    const ts = Number(req.body?.ts);
+    if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > HEARTBEAT_MAX_SKEW_MS) {
+      deny();
+      return;
+    }
+    const expected = crypto
+      .createHmac("sha256", host.agentToken)
+      .update(`heartbeat\n${hostId}\n${ts}`)
+      .digest("hex");
+    if (!safeEqual(sig, expected)) {
+      deny();
+      return;
+    }
+  } else {
+    const token = String(req.body?.token || req.headers.authorization?.replace(/^Bearer\s+/i, "") || "");
+    if (!token || !safeEqual(token, host.agentToken)) {
+      deny();
+      return;
+    }
   }
   recordHeartbeat(hostId);
   res.json({ ok: true });
@@ -288,19 +420,49 @@ api.post("/heartbeat", (req, res) => {
 
 /** Agent claims a pairing code for a host that was already added in the hub */
 api.post("/pair/complete", (req, res) => {
+  const key = clientKey(req);
+  const wait = agentEndpointLimiter.retryAfterMs(key);
+  if (wait > 0) {
+    res.setHeader("Retry-After", String(Math.ceil(wait / 1000)));
+    res.status(429).json({ error: "too many pairing attempts — wait and try again" });
+    return;
+  }
   const cfg = loadConfig();
-  const code = String(req.body?.pairingCode || "").toUpperCase();
-  const agentUrl = String(req.body?.agentUrl || "").replace(/\/$/, "");
-  if (!code || !agentUrl) {
+  const code = normalizeCode(String(req.body?.pairingCode || ""));
+  let agentUrl: string;
+  try {
+    agentUrl = parseAgentUrl(String(req.body?.agentUrl || ""));
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    return;
+  }
+  if (!code) {
     res.status(400).json({ error: "pairingCode and agentUrl required" });
     return;
   }
   const pairing = cfg.pairings.find(
-    (p) => p.code === code && !p.claimed && Date.parse(p.expiresAt) > Date.now()
+    (p) => safeEqual(p.code, code) && !p.claimed && Date.parse(p.expiresAt) > Date.now()
   );
   if (!pairing?.hostId) {
+    agentEndpointLimiter.fail(key);
+    console.log(`pair/complete: bad or expired code from ${key}`);
     res.status(400).json({ error: "invalid or expired pairing code" });
     return;
+  }
+  agentEndpointLimiter.succeed(key);
+
+  // Agents ≥0.2 send their TLS certificate so the hub can pin it.
+  const certPem = req.body?.certPem ? String(req.body.certPem) : "";
+  let certSha256 = "";
+  if (certPem) {
+    try {
+      certSha256 = new crypto.X509Certificate(certPem).fingerprint256;
+      certSha256 = normalizeFingerprint(certSha256);
+    } catch {
+      res.status(400).json({ error: "certPem is not a valid certificate" });
+      return;
+    }
+    agentUrl = agentUrl.replace(/^http:/, "https:");
   }
   const host = cfg.hosts.find((h) => h.id === pairing.hostId);
   if (!host) {
@@ -328,6 +490,8 @@ api.post("/pair/complete", (req, res) => {
   host.agentUrl = agentUrl;
   host.hostAddress = hostAddressFromAgentUrl(agentUrl);
   host.agentToken = pairing.token;
+  host.agentCertPem = certPem || undefined;
+  host.agentCertSha256 = certSha256 || undefined;
   host.paired = true;
   if (req.body?.name) host.name = String(req.body.name).trim();
   host.updatedAt = new Date().toISOString();
@@ -356,9 +520,10 @@ api.get("/discovered", requireAuth, (_req, res) => {
 /** One-click pair: hub creates host and pushes credentials to the agent */
 api.post("/discovered/pair", requireAuth, async (req, res) => {
   try {
-    const agentUrl = String(req.body?.agentUrl || "").replace(/\/$/, "");
-    if (!agentUrl) {
-      res.status(400).json({ error: "agentUrl required" });
+    const agentUrl = parseAgentUrl(String(req.body?.agentUrl || ""));
+    const pairCode = normalizeCode(String(req.body?.pairCode || ""));
+    if (!pairCode) {
+      res.status(400).json({ error: "enter the pairing code shown on the PC" });
       return;
     }
     const proto = String(req.headers["x-forwarded-proto"] || req.protocol);
@@ -368,6 +533,7 @@ api.post("/discovered/pair", requireAuth, async (req, res) => {
 
     const { host } = await pairDiscovered({
       agentUrl,
+      pairCode,
       name: req.body?.name ? String(req.body.name) : undefined,
       mac: req.body?.mac ? String(req.body.mac) : undefined,
       hubPublicUrl,

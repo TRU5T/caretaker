@@ -69,9 +69,23 @@ func Run(uninstall bool) error {
 	if upgraded {
 		verb = "updated"
 	}
-	info("Caretaker Agent",
-		"Caretaker Agent "+agent.Version+" is "+verb+" and running.\n\n"+
-			"Go back to the Hub in your browser → Setup, and tap Pair when this PC appears under Nearby PCs.")
+	code, err := config.EnsurePairCode(config.DefaultPath())
+	switch {
+	case err != nil:
+		info("Caretaker Agent",
+			"Caretaker Agent "+agent.Version+" is "+verb+" and running.\n\n"+
+				"Could not read the pairing code ("+err.Error()+"). Run `caretaker-agent pair-code` from an administrator prompt.")
+	case code == "":
+		info("Caretaker Agent",
+			"Caretaker Agent "+agent.Version+" is "+verb+" and running.\n\n"+
+				"This PC is already paired with a Hub. To pair it with a different Hub, run `caretaker-agent unpair` from an administrator prompt.")
+	default:
+		info("Caretaker Agent",
+			"Caretaker Agent "+agent.Version+" is "+verb+" and running.\n\n"+
+				"Pairing code:   "+config.FormatPairCode(code)+"\n\n"+
+				"Go back to the Hub in your browser → Setup. When this PC appears under Nearby PCs, type this code and tap Pair.\n\n"+
+				"Only enter this code into your own Hub. Lost it? Run `caretaker-agent pair-code` as administrator.")
+	}
 	return nil
 }
 
@@ -133,6 +147,15 @@ func installApp() (upgraded bool, err error) {
 		if err := copyWithRetry(src, dest); err != nil {
 			return false, fmt.Errorf("copy to %s: %w", dest, err)
 		}
+	}
+
+	// Create the TLS identity and pairing code before the service first starts,
+	// so the code shown in the dialog is the one the service uses.
+	if _, err := config.LoadOrCreateCert(config.DefaultPath()); err != nil {
+		return false, fmt.Errorf("create TLS certificate: %w", err)
+	}
+	if _, err := config.EnsurePairCode(config.DefaultPath()); err != nil {
+		return false, fmt.Errorf("create pairing code: %w", err)
 	}
 
 	if err := svc.InstallAndStart(dest); err != nil {

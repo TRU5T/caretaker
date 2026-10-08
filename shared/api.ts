@@ -45,6 +45,10 @@ export interface HostConfig {
   apolloPort?: number;
   hostAddress?: string;
   agentToken: string;
+  /** Agent's self-signed TLS certificate (PEM), pinned at pairing */
+  agentCertPem?: string;
+  /** Lowercase hex SHA-256 of the pinned certificate */
+  agentCertSha256?: string;
   paired: boolean;
   createdAt: string;
   updatedAt: string;
@@ -60,6 +64,7 @@ export interface HostPublic {
   hostAddress: string;
   hasAgentToken: boolean;
   paired: boolean;
+  agentCertSha256?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -77,6 +82,26 @@ export interface HostLiveStatus {
 export interface HeartbeatPayload {
   hostId: string;
   status: AgentStatus;
+  /** Unix ms; must be within 5 minutes of the hub's clock */
+  ts: number;
+  /** hex(HMAC-SHA256(key=agentToken, "heartbeat\n" + hostId + "\n" + ts)) */
+  sig: string;
+}
+
+/** Hub → agent POST /pair (agent must be unpaired) */
+export interface AgentPairRequest {
+  hostId: string;
+  token: string;
+  hubUrl: string;
+  name?: string;
+  mac?: string;
+  /** hex(HMAC-SHA256(key=pairCode without separators, "caretaker-pair-v1\n" + certSha256)) */
+  proof: string;
+}
+
+/** Hub → agent POST /rotate */
+export interface AgentRotateRequest {
+  /** New bearer token, at least 32 characters */
   token: string;
 }
 
@@ -91,8 +116,10 @@ export interface PairCompleteRequest {
   mac: string;
   name?: string;
   hostname?: string;
+  /** Agent's TLS certificate (PEM) for the hub to pin */
+  certPem?: string;
 }
 
 export const AGENT_DEFAULT_PORT = 7842;
-export const AGENT_VERSION = "0.1.0";
-export const HUB_VERSION = "0.1.0";
+export const AGENT_VERSION = "0.2.0";
+export const HUB_VERSION = "0.2.0";

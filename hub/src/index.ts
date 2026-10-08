@@ -1,4 +1,3 @@
-import https from "node:https";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,9 +9,6 @@ import { startDiscoveryListener } from "./discovery.js";
 import { agentWindowsInfo } from "./agentDownload.js";
 import { HUB_VERSION } from "./types.js";
 
-// Allow self-signed Apollo certificates for reachability probes.
-https.globalAgent.options.rejectUnauthorized = false;
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 ensureConfig();
@@ -20,6 +16,76 @@ startDiscoveryListener();
 
 const app = express();
 app.disable("x-powered-by");
+
+// Behind a reverse proxy, set CARETAKER_TRUST_PROXY (e.g. "1" or "loopback") so
+// rate limits see real client IPs. Off by default: X-Forwarded-For is spoofable.
+if (process.env.CARETAKER_TRUST_PROXY) {
+  const v = process.env.CARETAKER_TRUST_PROXY;
+  app.set("trust proxy", /^\d+$/.test(v) ? Number(v) : v);
+}
+
+app.use((_req, res, next) => {
+  res.setHeader(
+    "Content-Security-Policy",
+    [
+      "default-src 'self'",
+      "script-src 'self'",
+      // The UI sets a few inline style attributes
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data:",
+      "connect-src 'self'",
+      "manifest-src 'self'",
+      "base-uri 'none'",
+      "form-action 'self'",
+      "frame-ancestors 'none'",
+      "object-src 'none'",
+    ].join("; ")
+  );
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  next();
+});
+
+/**
+ * Reject cross-origin state-changing requests. Browsers always send Origin on
+ * cross-site POSTs; other apps on the same NAS IP count as "same-site" for
+ * cookies, so SameSite alone is not enough. Requests without Origin (the
+ * agent, curl) are left to the normal auth checks.
+ */
+function allowedOrigins(req: express.Request): Set<string> {
+  const out = new Set<string>();
+  const host = req.headers.host;
+  if (host) {
+    out.add(`http://${host}`);
+    out.add(`https://${host}`);
+  }
+  if (process.env.CARETAKER_PUBLIC_URL) {
+    try {
+      out.add(new URL(process.env.CARETAKER_PUBLIC_URL).origin);
+    } catch {
+      /* ignore malformed */
+    }
+  }
+  return out;
+}
+
+app.use("/api", (req, res, next) => {
+  if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") {
+    next();
+    return;
+  }
+  const origin = req.headers.origin;
+  if (origin && !allowedOrigins(req).has(origin)) {
+    res.status(403).json({ error: "cross-origin request blocked" });
+    return;
+  }
+  next();
+});
+
 app.use(express.json({ limit: "64kb" }));
 app.use(cookieParser());
 

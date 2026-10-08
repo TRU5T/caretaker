@@ -1,4 +1,4 @@
-import { AgentClient, probeApollo } from "./agentClient.js";
+import { clientFor, probeApollo } from "./agentClient.js";
 import { hostAddressFromAgentUrl, loadConfig, saveConfig } from "./config.js";
 import type { HostConfig, HostLiveStatus, HostSessionState, AgentStatus } from "./types.js";
 
@@ -86,7 +86,7 @@ export async function getLiveStatus(host: HostConfig): Promise<HostLiveStatus> {
   let apolloReachable = false;
 
   try {
-    const client = new AgentClient(host.agentUrl, host.agentToken);
+    const client = await clientFor(host);
     agent = await client.status();
     recordHeartbeat(host.id);
     wakingUntil = null;

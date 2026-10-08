@@ -18,7 +18,7 @@ CARETAKER_DATA=../data npm run dev
 
 UI: `http://localhost:8080` — default password `changeme` unless `CARETAKER_UI_PASSWORD` is set.
 
-**Agent** (Go 1.22+):
+**Agent** (Go 1.26+):
 
 ```bash
 cd agent

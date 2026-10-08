@@ -2,6 +2,7 @@ import dgram from "node:dgram";
 import crypto from "node:crypto";
 import { v4 as uuidv4 } from "uuid";
 import { hostAddressFromAgentUrl, loadConfig, normalizeMac, saveConfig } from "./config.js";
+import { AgentClient, fetchAgentCertificate, pairProof } from "./agentClient.js";
 import type { HostConfig } from "./types.js";
 
 export const BEACON_PORT = 7843;
@@ -14,6 +15,8 @@ export interface DiscoveredAgent {
   port: number;
   macs: string[];
   preferredMac: string;
+  /** Agent ≥0.2 serves HTTPS; older agents plain HTTP */
+  tls: boolean;
   addresses: addressesSeen;
   agentUrls: string[];
   lastSeenAt: string;
@@ -60,10 +63,18 @@ export function startDiscoveryListener(): void {
         macs?: string[];
         addresses?: string[];
         preferredMac?: string;
+        tls?: boolean;
       };
       if (data.service !== "caretaker-agent") return;
       const port = Number(data.port || 7842);
-      const hostname = String(data.hostname || rinfo.address);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) return;
+      // Beacons are unauthenticated LAN input: cap sizes, keep only plausible IPv4s
+      const hostname = String(data.hostname || rinfo.address).slice(0, 64);
+      data.addresses = (Array.isArray(data.addresses) ? data.addresses : [])
+        .map(String)
+        .filter((a) => /^\d{1,3}(\.\d{1,3}){3}$/.test(a))
+        .slice(0, 8);
+      data.macs = (Array.isArray(data.macs) ? data.macs : []).map(String).slice(0, 8);
       const key = agentKey(rinfo.address, port, hostname);
       const addresses = Array.from(
         new Set([rinfo.address, ...(data.addresses || [])].filter(Boolean))
@@ -84,7 +95,10 @@ export function startDiscoveryListener(): void {
             }
           })()
         : macs[0] || "";
-      const agentUrls = addresses.map((ip) => `http://${ip}:${port}`);
+      const tlsAgent = Boolean(data.tls);
+      const scheme = tlsAgent ? "https" : "http";
+      // Prefer the address the beacon actually came from
+      const agentUrls = addresses.map((ip) => `${scheme}://${ip}:${port}`);
       const existing = discovered.get(key);
       discovered.set(key, {
         id: existing?.id || uuidv4(),
@@ -94,11 +108,16 @@ export function startDiscoveryListener(): void {
         port,
         macs,
         preferredMac,
+        tls: tlsAgent,
         addresses,
         agentUrls,
         lastSeenAt: new Date().toISOString(),
         fromAddress: rinfo.address,
       });
+      if (discovered.size > 256) {
+        const oldest = discovered.keys().next().value;
+        if (oldest) discovered.delete(oldest);
+      }
     } catch {
       /* ignore malformed */
     }
@@ -115,24 +134,32 @@ export function startDiscoveryListener(): void {
 
 export async function pairDiscovered(opts: {
   agentUrl: string;
+  /** Code the agent shows on the PC (installer dialog / agent.log) */
+  pairCode: string;
   name?: string;
   mac?: string;
   hubPublicUrl: string;
 }): Promise<{ host: HostConfig }> {
-  const agentUrl = opts.agentUrl.replace(/\/$/, "");
-  // Refresh discovery info from agent
-  const discoverRes = await fetch(`${agentUrl}/discover`, {
-    signal: AbortSignal.timeout(4000),
-  });
-  if (!discoverRes.ok) {
-    throw new Error(`agent discover failed: ${discoverRes.status}`);
+  // Agents ≥0.2 only speak TLS. Old beacons advertised http:// on the same port.
+  const agentUrl = opts.agentUrl.replace(/\/$/, "").replace(/^http:/, "https:");
+
+  let pin;
+  try {
+    pin = await fetchAgentCertificate(agentUrl);
+  } catch (err) {
+    throw new Error(
+      `could not open a TLS connection to the agent (${err instanceof Error ? err.message : String(err)}). ` +
+        "Update the agent with the installer from this Hub."
+    );
   }
-  const info = (await discoverRes.json()) as {
+  const client = new AgentClient(agentUrl, "", pin);
+
+  const info = await client.request<{
     paired?: boolean;
     hostname?: string;
     preferredMac?: string;
     macs?: string[];
-  };
+  }>("/discover", { token: null });
   if (info.paired) {
     throw new Error("agent reports it is already paired");
   }
@@ -149,22 +176,31 @@ export async function pairDiscovered(opts: {
     throw new Error(`a paired host with MAC ${mac} already exists (${existing.name})`);
   }
 
-  const token = crypto.randomBytes(24).toString("hex");
-  const now = new Date().toISOString();
-  const name = (opts.name || info.hostname || "Gaming PC").trim();
+  const token = crypto.randomBytes(32).toString("hex");
+  const hostId = existing?.id || uuidv4();
+  const name = (opts.name || info.hostname || "Gaming PC").trim().slice(0, 64);
 
-  let host: HostConfig;
-  if (existing) {
-    existing.name = name;
-    existing.agentUrl = agentUrl;
-    existing.hostAddress = hostAddressFromAgentUrl(agentUrl);
-    existing.agentToken = token;
-    existing.paired = true;
-    existing.updatedAt = now;
-    host = existing;
-  } else {
+  // Ask the agent first; only record the host once the agent accepted the code.
+  await client.request("/pair", {
+    method: "POST",
+    token: null,
+    timeoutMs: 8000,
+    body: {
+      hostId,
+      token,
+      hubUrl: opts.hubPublicUrl.replace(/\/$/, ""),
+      name,
+      mac,
+      proof: pairProof(opts.pairCode, pin.certSha256),
+    },
+  });
+
+  const now = new Date().toISOString();
+  const fresh = loadConfig();
+  let host = fresh.hosts.find((h) => h.id === hostId);
+  if (!host) {
     host = {
-      id: uuidv4(),
+      id: hostId,
       name,
       mac,
       agentUrl,
@@ -176,30 +212,17 @@ export async function pairDiscovered(opts: {
       createdAt: now,
       updatedAt: now,
     };
-    cfg.hosts.push(host);
+    fresh.hosts.push(host);
   }
-  saveConfig(cfg);
-
-  const pairRes = await fetch(`${agentUrl}/pair`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    signal: AbortSignal.timeout(8000),
-    body: JSON.stringify({
-      hostId: host.id,
-      token,
-      hubUrl: opts.hubPublicUrl.replace(/\/$/, ""),
-      name: host.name,
-      mac: host.mac,
-    }),
-  });
-  if (!pairRes.ok) {
-    // Roll back paired flag if agent rejected
-    host.paired = false;
-    host.agentToken = "";
-    saveConfig(cfg);
-    const text = await pairRes.text().catch(() => "");
-    throw new Error(`agent pair failed: ${pairRes.status} ${text}`);
-  }
+  host.name = name;
+  host.agentUrl = agentUrl;
+  host.hostAddress = hostAddressFromAgentUrl(agentUrl);
+  host.agentToken = token;
+  host.agentCertPem = pin.certPem;
+  host.agentCertSha256 = pin.certSha256;
+  host.paired = true;
+  host.updatedAt = now;
+  saveConfig(fresh);
 
   return { host };
 }

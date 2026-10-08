@@ -2,6 +2,6 @@
 
 package svc
 
-func configureFirewall(string) {}
+func configureFirewall(string, int, string) {}
 
 func removeFirewall() {}

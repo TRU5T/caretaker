@@ -20,8 +20,12 @@ Then open `http://<this-host>:8080`. The image build cross-compiles the Windows 
 
 | Variable | Required | Notes |
 |----------|----------|--------|
-| `CARETAKER_UI_PASSWORD` | strong yes | Default is `changeme` if unset. Used only on first config create. |
-| `CARETAKER_SESSION_SECRET` | strong yes | HMAC key for the session cookie. Default is an insecure placeholder in compose. |
+| `CARETAKER_UI_PASSWORD` | recommended | First-run password. If unset it is `changeme`, and the UI refuses to do anything until you change it. |
+| `CARETAKER_SESSION_SECRET` | no | HMAC key for session cookies (32+ chars, `openssl rand -hex 32`). If unset, short, or a known placeholder, a random secret is generated and kept in `config.json`. |
+| `CARETAKER_RESET_PASSWORD` | no | `1` + `CARETAKER_UI_PASSWORD` resets the password on boot (signs everyone out). |
+| `CARETAKER_TRUST_PROXY` | no | Behind a reverse proxy, e.g. `1` or `loopback`, so rate limits see real client IPs. Leave unset otherwise. |
+| `CARETAKER_PUBLIC_URL` | no | The URL browsers use (e.g. `https://caretaker.lan`). Used for the agent's heartbeat URL and the cross-origin check behind a proxy. |
+| `CARETAKER_UID` / `CARETAKER_GID` | no | User the Hub runs as inside the container (default `1000:1000`; Unraid: `99`/`100`). |
 | `CARETAKER_PORT` | no | Default `8080` (compose uses host networking). |
 | `CARETAKER_DATA` | no | Config dir; compose mounts `../data`. |
 | `CARETAKER_SECURE_COOKIE` | no | Set to `1` if you terminate HTTPS in front of the Hub. |
@@ -31,7 +35,7 @@ Compose builds from the **repo root** (`context: ..`) so the Hub image can compi
 
 Compose uses `network_mode: host` so WoL UDP broadcasts actually leave the machine. Docker Desktop (macOS/Windows) generally cannot do this — run the Hub on Linux.
 
-Data file: `data/config.json` (password hash, session secret, hosts, pairing codes). Do not commit it (already gitignored).
+Data file: `data/config.json` (password hash, session secret, hosts, agent tokens, pinned agent certificates, pairing codes). It is written mode `0600` in a `0700` directory, and the container drops root before starting Node. Do not commit it (already gitignored).
 
 ## Run (dev)
 
@@ -44,10 +48,17 @@ Setup’s download button appears once `../agent/caretaker-agent-setup.exe` (or 
 
 ## Discovery
 
-Listens for unpaired agent beacons on UDP **7843** (`caretaker-agent` JSON). Pairing from **Setup → Nearby PCs** pushes `{ hostId, token, hubUrl }` to the agent’s `POST /pair`.
+Listens for unpaired agent beacons on UDP **7843** (`caretaker-agent` JSON). Pairing from **Setup → Nearby PCs**:
 
-Until an agent is paired, that `POST /pair` is unauthenticated on the LAN. Pair immediately.
+1. The Hub opens TLS to the agent and records its self-signed certificate.
+2. It sends `{ hostId, token, hubUrl, proof }` to `POST /pair`, where `proof = HMAC-SHA256(pairingCode, "caretaker-pair-v1\n" + certSha256)`.
+3. The agent accepts only if the proof matches its own certificate and the code it is showing. A machine in the middle would present a different certificate, so its proof fails.
+4. From then on every request is pinned to that certificate.
+
+Agents paired before 0.2 used plain HTTP. When such an agent is upgraded, the Hub pins its new certificate the first time it sees it (trust on first use). Unpair and pair again for a fully verified pin.
 
 ## Reverse proxy / TLS
 
-The Hub speaks HTTP. If you want HTTPS, put Caddy/nginx/Traefik in front on a private VPN IP — still do not port-forward it. Set `CARETAKER_SECURE_COOKIE=1` when the browser will only see HTTPS.
+The Hub speaks HTTP. If you want HTTPS, put Caddy/nginx/Traefik in front on a private VPN IP — still do not port-forward it. Set `CARETAKER_SECURE_COOKIE=1` when the browser will only see HTTPS, `CARETAKER_PUBLIC_URL` to the HTTPS URL, and `CARETAKER_TRUST_PROXY` so login rate limits apply per client.
+
+The Hub sends a strict Content-Security-Policy, `X-Frame-Options: DENY`, and rejects cross-origin `POST`/`PUT`/`DELETE` requests.
